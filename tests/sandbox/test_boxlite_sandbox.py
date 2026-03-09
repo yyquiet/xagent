@@ -22,12 +22,23 @@ def event_loop():
 
 
 def _check_boxlite_available() -> bool:
+    """Check if boxlite is available and can be initialized."""
     try:
         import boxlite
 
-        boxlite.Boxlite.default()
-        return True
-    except Exception:
+        # Try to initialize boxlite runtime
+        # This may fail on Linux without KVM access or on unsupported platforms
+        try:
+            boxlite.Boxlite.default()
+            return True
+        except BaseException as e:
+            # Catch all exceptions including Rust panics (PanicException)
+            import logging
+
+            logging.debug(f"Boxlite initialization failed: {type(e).__name__}: {e}")
+            return False
+    except ImportError:
+        # boxlite not installed
         return False
 
 

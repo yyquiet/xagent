@@ -1,0 +1,65 @@
+name: Test on self-hosted
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'src/xagent/sandbox/**'
+      - 'tests/sandbox/**'
+      - '.github/workflows/test-boxlite.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/xagent/sandbox/**'
+      - 'tests/sandbox/**'
+      - '.github/workflows/test-boxlite.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-on-self-hosted:
+    runs-on: self-hosted
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Ensure uv is available
+        shell: bash
+        run: |
+          set -e
+          if ! command -v uv >/dev/null 2>&1; then
+            echo "uv not found, installing..."
+            python3 -m pip install --user uv
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+          # Use python -m uv to be safe
+          python3 -m uv --version || uv --version
+
+      - name: Create virtual environment (if not exists)
+        shell: bash
+        run: |
+          set -e
+          # 使用 python3 -m uv 确保 uv 命令可用
+          _UV="python3 -m uv"
+          $_UV --version
+          # Use Python 3.12 for onnxruntime-gpu compatibility
+          $_UV venv --python 3.12
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -e
+          python3 -m uv sync --extra dev --extra deepdoc
+
+      - name: Run tests
+        shell: bash
+        run: |
+          set -e
+          python3 -m uv run python -m pytest tests/sandbox/test_boxlite_sandbox.py -v
