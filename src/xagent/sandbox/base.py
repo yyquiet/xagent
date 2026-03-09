@@ -108,6 +108,9 @@ class ExecResult:
     stderr: str
     """Standard error output."""
 
+    error_message: Optional[str] = None
+    """Error message."""
+
     @property
     def success(self) -> bool:
         return self.exit_code == 0

@@ -65,6 +65,7 @@ dependencies = [
   "playwright>=1.40.0",
   "beartype>=0.18.5",
   "matplotlib>=3.5.0",
+  "boxlite>=0.6.0",
 ]
 
 [project.optional-dependencies]
