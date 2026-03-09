@@ -30,15 +30,17 @@ def _check_boxlite_available() -> bool:
         # This may fail on Linux without KVM access or on unsupported platforms
         try:
             boxlite.Boxlite.default()
+            print("\n✓ Boxlite initialization success")
             return True
         except BaseException as e:
             # Catch all exceptions including Rust panics (PanicException)
-            import logging
-
-            logging.debug(f"Boxlite initialization failed: {type(e).__name__}: {e}")
+            error_msg = f"✗ Boxlite initialization failed: {type(e).__name__}: {e}"
+            print(f"\n{error_msg}")
             return False
-    except ImportError:
+    except ImportError as e:
         # boxlite not installed
+        error_msg = f"✗ Boxlite import failed: {type(e).__name__}: {e}"
+        print(f"\n{error_msg}")
         return False
 
 

@@ -62,4 +62,4 @@ jobs:
         shell: bash
         run: |
           set -e
-          python3 -m uv run python -m pytest tests/sandbox/test_boxlite_sandbox.py -v
+          python3 -m uv run python -m pytest tests/sandbox/test_boxlite_sandbox.py -v -s
