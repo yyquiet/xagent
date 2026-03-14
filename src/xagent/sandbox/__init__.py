@@ -10,18 +10,28 @@ from .base import (
     SandboxInfo,
     SandboxService,
     SandboxSnapshot,
-    SandBoxTemplate,
+    SandboxTemplate,
     TemplateType,
+)
+from .boxlite_sandbox import (
+    BoxliteSandbox,
+    BoxliteSandboxService,
+    BoxliteStore,
+    MemBoxliteStore,
 )
 
 __all__ = [
     "TemplateType",
     "CodeType",
-    "SandBoxTemplate",
+    "SandboxTemplate",
     "SandboxConfig",
     "SandboxInfo",
     "SandboxSnapshot",
     "ExecResult",
     "Sandbox",
     "SandboxService",
+    "BoxliteSandbox",
+    "BoxliteStore",
+    "MemBoxliteStore",
+    "BoxliteSandboxService",
 ]

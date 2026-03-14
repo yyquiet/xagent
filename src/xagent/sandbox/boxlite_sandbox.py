@@ -23,7 +23,7 @@ from .base import (
     SandboxInfo,
     SandboxService,
     SandboxSnapshot,
-    SandBoxTemplate,
+    SandboxTemplate,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,8 +43,8 @@ class BoxliteStore(abc.ABC):
         """Add sandbox info."""
 
     @abc.abstractmethod
-    def update_state(self, name: str, state: str) -> None:
-        """Update sandbox state."""
+    def update_info_state(self, name: str, state: str) -> None:
+        """Update sandbox info state."""
 
     @abc.abstractmethod
     def delete_info(self, name: str) -> None:
@@ -65,7 +65,7 @@ class MemBoxliteStore(BoxliteStore):
     def add_info(self, name: str, info: SandboxInfo) -> None:
         self._metadata[name] = info
 
-    def update_state(self, name: str, state: str) -> None:
+    def update_info_state(self, name: str, state: str) -> None:
         if name in self._metadata:
             self._metadata[name].state = state
 
@@ -85,8 +85,8 @@ def _get_state(raw_info: boxlite.BoxInfo) -> str:  # type: ignore[no-any-unimpor
 
 
 def _get_info_from_box_info(raw_info: boxlite.BoxInfo) -> SandboxInfo:  # type: ignore[no-any-unimported]
-    tpl = SandBoxTemplate(
-        _type="image",
+    tpl = SandboxTemplate(
+        type="image",
         image=raw_info.image,
     )
     cfg = SandboxConfig(
@@ -136,16 +136,14 @@ class BoxliteSandbox(Sandbox):
     async def stop(self) -> None:
         """Stop the sandbox, preserving its state."""
         await self._box.stop()
-        self._store.update_state(self._name, "stopped")
+        self._store.update_info_state(self._name, "stopped")
 
     async def info(self) -> SandboxInfo:
         """Get sandbox status information."""
-        try:
-            # Update state in real-time
-            box_info = await self._box._runtime.get_info(self._name)
-            self._info.state = _get_state(box_info)
-        except Exception as e:
-            logger.error(f"get_info err: {e}")
+        # Update state in real-time
+        # box.info() will throw an error when the box has been stopped, so we need to use the box._runtime.get_info(name) method instead.
+        box_info = await self._box._runtime.get_info(self._name)
+        self._info.state = _get_state(box_info)
 
         return self._info
 
@@ -182,35 +180,11 @@ class BoxliteSandbox(Sandbox):
     ) -> ExecResult:
         """
         Execute code snippet.
-
-        Automatically selects optimal method based on code length:
-        - Short code (<1KB): Direct execution
-        - Long code (>=1KB): Write to file and execute (no length limit)
         """
-        # Short code threshold: 1KB
-        SHORT_CODE_THRESHOLD = 1024
-
         if code_type == "python":
-            if len(code) < SHORT_CODE_THRESHOLD:
-                # Short code: use -c parameter
-                return await self.exec("python", "-c", code, env=env)
-            else:
-                # Long code: write to file
-                uuid_str = str(uuid.uuid4())
-                remote_path = f"/tmp/_sandbox_code_{uuid_str}.py"
-                await self.write_file(code, remote_path, overwrite=True)
-                return await self.exec("python", remote_path, env=env)
-
+            return await self.exec("python", "-c", code, env=env)
         elif code_type == "javascript":
-            if len(code) < SHORT_CODE_THRESHOLD:
-                # Short code: use -e parameter
-                return await self.exec("node", "-e", code, env=env)
-            else:
-                # Long code: write to file
-                uuid_str = str(uuid.uuid4())
-                remote_path = f"/tmp/_sandbox_code_{uuid_str}.js"
-                await self.write_file(code, remote_path, overwrite=True)
-                return await self.exec("node", remote_path, env=env)
+            return await self.exec("node", "-e", code, env=env)
 
     # --- File Operations ---
 
@@ -228,7 +202,6 @@ class BoxliteSandbox(Sandbox):
         # First copy to temp directory (if copying directly to mount directory, it won't be readable on host)
         # Note: Cannot use /tmp as it's a tmpfs mount, copy_in will fail
         # Use /var/tmp or other non-tmpfs directory
-        import uuid
 
         temp_filename = f"_upload_{uuid.uuid4().hex}"
         temp_remote = f"/var/tmp/{temp_filename}"
@@ -270,7 +243,6 @@ class BoxliteSandbox(Sandbox):
             raise FileExistsError(f"Local file already exists: {local_path}")
 
         # First copy to temp directory (avoid volume mount issues)
-        import uuid
 
         temp_filename = f"_download_{uuid.uuid4().hex}"
         temp_remote = f"/var/tmp/{temp_filename}"
@@ -327,7 +299,7 @@ class BoxliteSandbox(Sandbox):
 
 async def _create_or_reuse_box(  # type: ignore[no-any-unimported]
     name: str,
-    template: SandBoxTemplate,
+    template: SandboxTemplate,
     config: SandboxConfig,
     runtime: boxlite.Boxlite,
 ) -> SimpleBox:
@@ -341,6 +313,7 @@ async def _create_or_reuse_box(  # type: ignore[no-any-unimported]
         "runtime": runtime,
         "name": name,
         "reuse_existing": True,  # Allow reusing existing box
+        "working_dir": config.working_dir,
     }
 
     if config.env:
@@ -392,11 +365,11 @@ class BoxliteSandboxService(SandboxService):
     async def get_or_create(
         self,
         name: str,
-        template: Optional[SandBoxTemplate] = None,
+        template: Optional[SandboxTemplate] = None,
         config: Optional[SandboxConfig] = None,
     ) -> BoxliteSandbox:
         # Snapshot creation not supported
-        if template is not None and template._type == "snapshot":
+        if template is not None and template.type == "snapshot":
             raise NotImplementedError("Unsupported")
 
         # Get or create lock for this name
@@ -417,7 +390,7 @@ class BoxliteSandboxService(SandboxService):
                     info = _get_info_from_box_info(raw_box.info())
             else:
                 # Box doesn't exist, create new one
-                tpl = template or SandBoxTemplate(_type="image", image="python:slim")
+                tpl = template or SandboxTemplate(type="image", image="python:slim")
                 cfg = config or SandboxConfig()
                 info = SandboxInfo(name=name, state="running", template=tpl, config=cfg)
 
@@ -432,7 +405,7 @@ class BoxliteSandboxService(SandboxService):
                 self._store.add_info(name, info)
 
             # Update state
-            self._store.update_state(name, "running")
+            self._store.update_info_state(name, "running")
             return BoxliteSandbox(
                 sandbox_name=name, box=box, info=info, store=self._store
             )
@@ -470,6 +443,9 @@ class BoxliteSandboxService(SandboxService):
                 self._locks.pop(name, None)
         except Exception as e:
             raise RuntimeError(f"delete {name!r} error: {e}") from e
+
+    async def supports_snapshots(self) -> bool:
+        return False
 
     async def create_snapshot(self, name: str, snapshot_id: str) -> SandboxSnapshot:
         raise NotImplementedError("Unsupported")

@@ -5,8 +5,9 @@ Abstract interface for Sandbox Service.
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass, field
 from typing import Literal, Optional
+
+from pydantic import BaseModel, Field
 
 TemplateType = Literal["image", "snapshot"]
 """Supported template types."""
@@ -15,101 +16,96 @@ CodeType = Literal["python", "javascript"]
 """Supported code execution types."""
 
 
-@dataclass
-class SandBoxTemplate:
+class SandboxTemplate(BaseModel):
     """
     Template for creating a sandbox.
     """
 
-    _type: Optional[TemplateType] = "image"
-    """Template type."""
+    type: Optional[TemplateType] = Field(default="image", description="Template type")
 
-    image: Optional[str] = None
-    """Container image, required when _type=image."""
+    image: Optional[str] = Field(
+        default=None, description="Container image, required when type=image"
+    )
 
-    snapshot_id: Optional[str] = None
-    """Snapshot ID, required when _type=snapshot."""
+    snapshot_id: Optional[str] = Field(
+        default=None, description="Snapshot ID, required when type=snapshot"
+    )
 
 
-@dataclass
-class SandboxConfig:
+class SandboxConfig(BaseModel):
     """
     Configuration parameters for creating a sandbox.
     """
 
-    cpus: Optional[int] = 1
-    """CPU core limit."""
+    working_dir: Optional[str] = Field(default="/home", description="Working dir")
 
-    memory: Optional[int] = 512
-    """Memory limit in MB."""
+    cpus: Optional[int] = Field(default=1, ge=1, description="CPU core limit")
 
-    env: Optional[dict[str, str]] = None
-    """Environment variables to inject."""
+    memory: Optional[int] = Field(default=512, ge=128, description="Memory limit in MB")
 
-    volumes: Optional[list[tuple[str, str, str]]] = None
-    """Volume mounts as (host_path, guest_path, mode).
-    Mode: 'ro' (read-only) or 'rw' (read-write)."""
+    env: Optional[dict[str, str]] = Field(
+        default=None, description="Environment variables to inject"
+    )
 
-    network_isolated: Optional[bool] = False
-    """Network isolation. True blocks external network access."""
+    volumes: Optional[list[tuple[str, str, str]]] = Field(
+        default=None,
+        description="Volume mounts as (host_path, guest_path, mode). Mode: 'ro' (read-only) or 'rw' (read-write)",
+    )
 
-    ports: Optional[list[tuple[int, int]]] = None
-    """Port mappings as [(host_port, guest_port)]."""
+    network_isolated: Optional[bool] = Field(
+        default=False,
+        description="Network isolation. True blocks external network access",
+    )
+
+    ports: Optional[list[tuple[int, int]]] = Field(
+        default=None, description="Port mappings as [(host_port, guest_port)]"
+    )
 
 
-@dataclass
-class SandboxInfo:
+class SandboxInfo(BaseModel):
     """Sandbox status information."""
 
-    name: str
-    """Sandbox name."""
+    name: str = Field(description="Sandbox name")
 
-    state: str
-    """Sandbox state:
-    - 'running': Running
-    - 'stopped': Stopped
-    - 'unknown': Unknown
-    """
+    state: str = Field(description="Sandbox state: 'running', 'stopped', or 'unknown'")
 
-    template: SandBoxTemplate
-    """Template used to create this sandbox."""
+    template: SandboxTemplate = Field(
+        description="Template used to create this sandbox"
+    )
 
-    config: SandboxConfig
-    """Configuration used to create this sandbox."""
+    config: SandboxConfig = Field(
+        description="Configuration used to create this sandbox"
+    )
 
-    created_at: Optional[str] = None
-    """Creation time in ISO 8601 format."""
+    created_at: Optional[str] = Field(
+        default=None, description="Creation time in ISO 8601 format"
+    )
 
 
-@dataclass
-class SandboxSnapshot:
+class SandboxSnapshot(BaseModel):
     """Sandbox snapshot information."""
 
-    snapshot_id: str
-    """Snapshot ID."""
+    snapshot_id: str = Field(description="Snapshot ID")
 
-    metadata: dict = field(default_factory=dict)
-    """Snapshot metadata."""
+    metadata: dict = Field(default_factory=dict, description="Snapshot metadata")
 
-    created_at: Optional[str] = None
-    """Creation time in ISO 8601 format."""
+    created_at: Optional[str] = Field(
+        default=None, description="Creation time in ISO 8601 format"
+    )
 
 
-@dataclass
-class ExecResult:
+class ExecResult(BaseModel):
     """Execution result of a command or code."""
 
-    exit_code: int
-    """Exit code. 0 indicates success, non-zero indicates failure."""
+    exit_code: int = Field(
+        description="Exit code. 0 indicates success, non-zero indicates failure"
+    )
 
-    stdout: str
-    """Standard output."""
+    stdout: str = Field(description="Standard output")
 
-    stderr: str
-    """Standard error output."""
+    stderr: str = Field(description="Standard error output")
 
-    error_message: Optional[str] = None
-    """Error message."""
+    error_message: Optional[str] = Field(default=None, description="Error message")
 
     @property
     def success(self) -> bool:
@@ -284,14 +280,14 @@ class SandboxService(abc.ABC):
         await service.create_snapshot("my-box", "my-box-v1.0")
 
         # Create from snapshot
-        await service.get_or_create("my-box", template=SandBoxTemplate(_type="snapshot", snapshot_id="my-box-v1.0"))
+        await service.get_or_create("my-box", template=SandboxTemplate(_type="snapshot", snapshot_id="my-box-v1.0"))
     """
 
     @abc.abstractmethod
     async def get_or_create(
         self,
         name: str,
-        template: Optional[SandBoxTemplate] = None,
+        template: Optional[SandboxTemplate] = None,
         config: Optional[SandboxConfig] = None,
     ) -> Sandbox:
         """Get or create a sandbox, handling resume automatically.
@@ -324,6 +320,14 @@ class SandboxService(abc.ABC):
 
         Args:
             name: Sandbox name to delete.
+        """
+
+    @abc.abstractmethod
+    async def supports_snapshots(self) -> bool:
+        """Check if this sandbox service supports snapshot operations.
+
+        Returns:
+            bool: True if snapshots are supported, False otherwise.
         """
 
     @abc.abstractmethod

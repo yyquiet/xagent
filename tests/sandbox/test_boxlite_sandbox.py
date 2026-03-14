@@ -10,7 +10,7 @@ import tempfile
 
 import pytest
 
-from src.xagent.sandbox.base import SandboxConfig, SandBoxTemplate
+from src.xagent.sandbox.base import SandboxConfig, SandboxTemplate
 from src.xagent.sandbox.boxlite_sandbox import BoxliteSandboxService, MemBoxliteStore
 
 
@@ -69,9 +69,7 @@ class TestBoxliteSandboxService:
             print("\n=== Test creating and deleting sandbox ===")
 
             # Create sandbox
-            template = SandBoxTemplate(_type="image", image="python:slim")
-
-            import tempfile
+            template = SandboxTemplate(type="image", image="python:slim")
 
             temp_dir = tempfile.mkdtemp()
             config = SandboxConfig(
@@ -186,7 +184,7 @@ class TestBoxliteSandboxService:
             # First creation
             sandbox1 = await service.get_or_create(
                 name,
-                template=SandBoxTemplate(_type="image", image="python:slim"),
+                template=SandboxTemplate(type="image", image="python:slim"),
                 config=SandboxConfig(cpus=1, memory=256),
             )
 
@@ -217,11 +215,11 @@ class TestBoxliteSandboxService:
     @pytest.mark.asyncio(loop_scope="module")
     async def test_list_sandboxes(self):
         """Test listing sandboxes"""
-        list = ["test-list-1", "test-list-2"]
+        sandbox_names = ["test-list-1", "test-list-2"]
         service = BoxliteSandboxService(MemBoxliteStore())
 
         # Cleanup
-        for name in list:
+        for name in sandbox_names:
             try:
                 await service.delete(name)
             except Exception:
@@ -231,24 +229,23 @@ class TestBoxliteSandboxService:
             print("\n=== Test listing sandboxes ===")
 
             sandbox1 = await service.get_or_create(
-                list[0],
-                template=SandBoxTemplate(_type="image", image="python:slim"),
+                sandbox_names[0],
+                template=SandboxTemplate(type="image", image="python:slim"),
                 config=SandboxConfig(cpus=1, memory=256),
             )
 
             sandbox2 = await service.get_or_create(
-                list[1],
-                template=SandBoxTemplate(_type="image", image="python:slim"),
+                sandbox_names[1],
+                template=SandboxTemplate(type="image", image="python:slim"),
                 config=SandboxConfig(cpus=1, memory=256),
             )
 
-            # List
             sandboxes = await service.list_sandboxes()
             names = [s.name for s in sandboxes]
             print(f"Sandbox list: {names}")
 
-            assert list[0] in names
-            assert list[1] in names
+            assert sandbox_names[0] in names
+            assert sandbox_names[1] in names
 
             # Cleanup
             await sandbox1.stop()
@@ -257,7 +254,7 @@ class TestBoxliteSandboxService:
             print("✅ List test passed")
 
         finally:
-            for name in list:
+            for name in sandbox_names:
                 try:
                     await service.delete(name)
                 except Exception:
@@ -282,7 +279,7 @@ class TestBoxliteSandboxService:
                 print(f"Task {task_id}: Starting get_or_create")
                 sandbox = await service.get_or_create(
                     name,
-                    template=SandBoxTemplate(_type="image", image="python:slim"),
+                    template=SandboxTemplate(type="image", image="python:slim"),
                     config=SandboxConfig(cpus=1, memory=256),
                 )
                 print(f"Task {task_id}: get_or_create completed")
@@ -332,7 +329,7 @@ class TestBoxliteSandboxService:
             # Create sandbox first
             sandbox = await service.get_or_create(
                 name,
-                template=SandBoxTemplate(_type="image", image="python:slim"),
+                template=SandboxTemplate(type="image", image="python:slim"),
                 config=SandboxConfig(cpus=1, memory=256),
             )
 
@@ -379,7 +376,7 @@ class TestBoxliteSandboxService:
             # Create sandbox first
             sandbox = await service.get_or_create(
                 name,
-                template=SandBoxTemplate(_type="image", image="python:slim"),
+                template=SandboxTemplate(type="image", image="python:slim"),
                 config=SandboxConfig(cpus=1, memory=256),
             )
 
@@ -445,7 +442,7 @@ class TestBoxliteSandbox:
 
             sandbox = await service.get_or_create(
                 name,
-                template=SandBoxTemplate(_type="image", image="python:slim"),
+                template=SandboxTemplate(type="image", image="python:slim"),
                 config=SandboxConfig(cpus=1, memory=256),
             )
 
@@ -486,7 +483,7 @@ class TestBoxliteSandbox:
 
             sandbox = await service.get_or_create(
                 name,
-                template=SandBoxTemplate(_type="image", image="python:slim"),
+                template=SandboxTemplate(type="image", image="python:slim"),
                 config=SandboxConfig(cpus=1, memory=256),
             )
 
@@ -534,7 +531,7 @@ class TestBoxliteSandbox:
 
             sandbox = await service.get_or_create(
                 name,
-                template=SandBoxTemplate(_type="image", image="node:22-slim"),
+                template=SandboxTemplate(type="image", image="node:22-slim"),
                 config=SandboxConfig(cpus=1, memory=256),
             )
 
@@ -582,7 +579,7 @@ class TestBoxliteSandbox:
 
             sandbox = await service.get_or_create(
                 name,
-                template=SandBoxTemplate(_type="image", image="python:slim"),
+                template=SandboxTemplate(type="image", image="python:slim"),
                 config=SandboxConfig(cpus=1, memory=256),
             )
 
@@ -638,7 +635,7 @@ class TestBoxliteSandbox:
 
             sandbox = await service.get_or_create(
                 name,
-                template=SandBoxTemplate(_type="image", image="python:slim"),
+                template=SandboxTemplate(type="image", image="python:slim"),
                 config=SandboxConfig(cpus=1, memory=256),
             )
 
@@ -728,7 +725,7 @@ class TestBoxliteSandbox:
                 # Create sandbox with volume mount
                 sandbox = await service.get_or_create(
                     name,
-                    template=SandBoxTemplate(_type="image", image="python:slim"),
+                    template=SandboxTemplate(type="image", image="python:slim"),
                     config=SandboxConfig(
                         cpus=1,
                         memory=256,
