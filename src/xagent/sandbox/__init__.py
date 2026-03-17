@@ -2,6 +2,8 @@
 Sandbox Support.
 """
 
+import os
+
 from .base import (
     CodeType,
     ExecResult,
@@ -14,7 +16,7 @@ from .base import (
     TemplateType,
 )
 
-DEFAULT_SANDBOX_IMAGE = "xprobe/xagent-sandbox:v0.2.0"
+DEFAULT_SANDBOX_IMAGE = os.getenv("SANDBOX_IMAGE", "xprobe/xagent-sandbox:latest")
 
 __all__ = [
     "DEFAULT_SANDBOX_IMAGE",

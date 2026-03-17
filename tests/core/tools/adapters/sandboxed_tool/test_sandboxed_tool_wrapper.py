@@ -16,17 +16,17 @@ except ImportError:
         allow_module_level=True,
     )
 
-from src.xagent.core.tools.adapters.vibe.javascript_executor import (
+from xagent.core.tools.adapters.vibe.javascript_executor import (
     get_javascript_executor_tool,
 )
-from src.xagent.core.tools.adapters.vibe.python_executor import get_python_executor_tool
-from src.xagent.core.tools.adapters.vibe.sandboxed_tool.sandboxed_tool_wrapper import (
+from xagent.core.tools.adapters.vibe.python_executor import get_python_executor_tool
+from xagent.core.tools.adapters.vibe.sandboxed_tool.sandboxed_tool_wrapper import (
     create_sandboxed_tool,
     upload_code_to_sandbox,
 )
-from src.xagent.sandbox import DEFAULT_SANDBOX_IMAGE
-from src.xagent.sandbox.base import SandboxConfig
-from src.xagent.sandbox.boxlite_sandbox import (
+from xagent.sandbox import DEFAULT_SANDBOX_IMAGE
+from xagent.sandbox.base import SandboxConfig
+from xagent.sandbox.boxlite_sandbox import (
     BoxliteSandboxService,
     MemBoxliteStore,
     SandboxTemplate,

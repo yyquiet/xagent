@@ -17,9 +17,9 @@ except ImportError:
         "boxlite not installed, skipping sandbox tests", allow_module_level=True
     )
 
-from src.xagent.sandbox import DEFAULT_SANDBOX_IMAGE
-from src.xagent.sandbox.base import SandboxConfig, SandboxTemplate
-from src.xagent.sandbox.boxlite_sandbox import BoxliteSandboxService, MemBoxliteStore
+from xagent.sandbox import DEFAULT_SANDBOX_IMAGE
+from xagent.sandbox.base import SandboxConfig, SandboxTemplate
+from xagent.sandbox.boxlite_sandbox import BoxliteSandboxService, MemBoxliteStore
 
 TEST_IMAGE = DEFAULT_SANDBOX_IMAGE
 
