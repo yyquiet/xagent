@@ -14,7 +14,10 @@ from .base import (
     TemplateType,
 )
 
+DEFAULT_SANDBOX_IMAGE = "xprobe/xagent-sandbox:v0.2.0"
+
 __all__ = [
+    "DEFAULT_SANDBOX_IMAGE",
     "TemplateType",
     "CodeType",
     "SandboxTemplate",

@@ -7,7 +7,7 @@ import os
 import threading
 from typing import Optional
 
-from ..sandbox import SandboxService
+from ..sandbox import DEFAULT_SANDBOX_IMAGE, SandboxService
 from ..sandbox.base import Sandbox, SandboxConfig, SandboxTemplate
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ class SandboxManager:
             Sandbox instance
         """
         # TODO: Determine template and config based on user configuration
-        sandbox_image = os.getenv("SANDBOX_IMAGE", "python:slim")
+        sandbox_image = os.getenv("SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE)
         try:
             sandbox_cpus = int(os.getenv("SANDBOX_CPUS", "1"))
         except ValueError:
@@ -95,7 +95,7 @@ class SandboxManager:
         """
         Warmup default image.
         """
-        sandbox_image = os.getenv("SANDBOX_IMAGE", "python:slim")
+        sandbox_image = os.getenv("SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE)
         warmup_name = "__warmup__"
         try:
             template = SandboxTemplate(type="image", image=sandbox_image)
