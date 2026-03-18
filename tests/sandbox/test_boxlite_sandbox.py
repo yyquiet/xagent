@@ -21,8 +21,6 @@ from xagent.sandbox import DEFAULT_SANDBOX_IMAGE
 from xagent.sandbox.base import SandboxConfig, SandboxTemplate
 from xagent.sandbox.boxlite_sandbox import BoxliteSandboxService, MemBoxliteStore
 
-TEST_IMAGE = DEFAULT_SANDBOX_IMAGE
-
 
 @pytest.fixture(scope="module")
 def event_loop():

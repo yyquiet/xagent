@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import textwrap
 import uuid
 from typing import Optional
 
@@ -182,8 +183,6 @@ class BoxliteSandbox(Sandbox):
         """
         Execute code snippet.
         """
-        import textwrap
-
         code = textwrap.dedent(code)
         if code_type == "python":
             return await self.exec("python", "-c", code, env=env)
