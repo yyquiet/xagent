@@ -62,18 +62,27 @@ def _run_in_separate_loop(coro: Awaitable[T]) -> T:
 
     try:
         # Check if we are already in a running event loop
-        asyncio.get_running_loop()
-        # If yes, we MUST offload to a thread to avoid "nested loop" error
-        logger.debug(
-            "Detected running event loop, using thread isolation for async execution"
-        )
-        thread = threading.Thread(target=target)
-        thread.start()
-        thread.join()
-    except RuntimeError:
-        # No running event loop, we can use asyncio.run() directly (lighter weight)
-        logger.debug("No running event loop detected, using direct asyncio.run()")
-        return asyncio.run(coro)  # type: ignore
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # If yes, we MUST offload to a thread to avoid "nested loop" error
+            logger.debug(
+                "Detected running event loop, using thread isolation for async execution"
+            )
+            thread = threading.Thread(target=target)
+            thread.start()
+            thread.join()
+        else:
+            # No running event loop, we can use asyncio.run() directly (lighter weight)
+            logger.debug("No running event loop detected, using direct asyncio.run()")
+            return asyncio.run(coro)  # type: ignore
+    except Exception as e:
+        # Fallback for unexpected errors in loop detection
+        logger.error(f"Error in async execution wrapper: {e}")
+        raise e
 
     # Handle results from thread execution
     if exception:
@@ -258,6 +267,7 @@ class CollectionManager:
                 ("collection_locked", pa.bool_()),
                 ("allow_mixed_parse_methods", pa.bool_()),
                 ("skip_config_validation", pa.bool_()),
+                ("ingestion_config", pa.string()),  # JSON string
                 ("created_at", pa.timestamp("us")),
                 ("updated_at", pa.timestamp("us")),
                 ("last_accessed_at", pa.timestamp("us")),

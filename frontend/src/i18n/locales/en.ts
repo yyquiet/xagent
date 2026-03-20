@@ -1583,6 +1583,10 @@ Build when you need.`
         searchFailed: "Search failed",
         partialSuccess: "Partial success: {message}",
         deleteFailedWithMessage: "Delete failed: {message}",
+        saveConfigFailed: "Failed to save configuration",
+      },
+      success: {
+        configSaved: "Configuration saved successfully",
       },
     },
   },

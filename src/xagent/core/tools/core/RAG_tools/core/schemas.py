@@ -1282,7 +1282,13 @@ class CollectionInfo(BaseModel):
     )
     skip_config_validation: bool = Field(
         default=False,
-        description="Skip collection configuration validation. Use with caution.",
+        description="Whether to skip configuration validation during ingestion. Use with caution.",
+    )
+
+    # 📝 Stored Ingestion Config
+    ingestion_config: Optional[IngestionConfig] = Field(
+        default=None,
+        description="Default ingestion configuration for the collection.",
     )
 
     # 🕒 Timestamps
@@ -1347,6 +1353,12 @@ class CollectionInfo(BaseModel):
         # Serialize complex types to JSON strings for LanceDB
         data["extra_metadata"] = json.dumps(data["extra_metadata"])
         data["document_names"] = json.dumps(data["document_names"])
+
+        # Serialize ingestion_config if present
+        if data.get("ingestion_config"):
+            data["ingestion_config"] = json.dumps(data["ingestion_config"])
+        else:
+            data["ingestion_config"] = None
 
         return data
 
