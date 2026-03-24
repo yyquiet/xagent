@@ -18,7 +18,7 @@ from ..config import (
     get_uploads_dir,
 )
 from ..core.tools.adapters.vibe.sandboxed_tool.sandboxed_tool_wrapper import (
-    upload_code_to_sandbox,
+    build_code_mount_volumes,
 )
 from ..sandbox import SandboxService
 from ..sandbox.base import Sandbox, SandboxConfig, SandboxTemplate
@@ -93,24 +93,25 @@ class SandboxManager:
         lifecycle_id: str,
         *,
         ensure_dir: bool,
-    ) -> Optional[list[tuple[str, str, str]]]:
+    ) -> list[tuple[str, str, str]]:
         """
-        Build volume param.
-
-        Only supports user lifecycle type at the moment.
+        Build volume mounts: code (read-only) + user workspace (read-write).
 
         Args:
             lifecycle_type: e.g. task|user
             lifecycle_id: e.g. task_id|user_id
             ensure_dir: When True, create the host directory
         """
-        volumes: Optional[list[tuple[str, str, str]]] = None
+        # Code mounts are always present (at least src/)
+        volumes: list[tuple[str, str, str]] = list(build_code_mount_volumes())
+
+        # Mount user workspace as read-write
         if lifecycle_type == "user":
             user_workspace = str((get_uploads_dir() / f"user_{lifecycle_id}").resolve())
             if ensure_dir:
                 os.makedirs(user_workspace, exist_ok=True)
-            # Use the same absolute path for both host and sandbox.
-            volumes = [(user_workspace, user_workspace, "rw")]
+            volumes.append((user_workspace, user_workspace, "rw"))
+
         return volumes
 
     async def get_or_create_sandbox(
@@ -169,8 +170,6 @@ class SandboxManager:
                 config=config,
             )
 
-            # Package and upload xagent code
-            await upload_code_to_sandbox(sandbox)
             self._cache[sandbox_name] = sandbox
             return sandbox
 

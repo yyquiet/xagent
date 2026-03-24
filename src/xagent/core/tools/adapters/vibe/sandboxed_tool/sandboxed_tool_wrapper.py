@@ -486,192 +486,31 @@ async def create_workspace_in_sandbox(
     await sandbox.exec("mkdir", "-p", *dirs)
 
 
-def _calculate_tar_hash(tar_path: str) -> str:
-    """
-    Calculate SHA256 hash of TAR file
+def _get_project_root() -> Path:
+    """Find project root by traversing up to locate pyproject.toml + src/xagent."""
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "pyproject.toml").exists() and (
+            parent / "src" / "xagent"
+        ).exists():
+            return parent
+    raise RuntimeError("Could not find project root")
 
-    Args:
-        tar_path: TAR file path
+
+def build_code_mount_volumes() -> list[tuple[str, str, str]]:
+    """Build read-only volume mounts for src/ and tests/ directories.
 
     Returns:
-        Hash string (first 16 characters of SHA256)
+        List of (host_path, guest_path, mode) tuples.
     """
-    import hashlib
+    project_root = _get_project_root()
+    volumes: list[tuple[str, str, str]] = []
 
-    hasher = hashlib.sha256()
-    with open(tar_path, "rb") as f:
-        # Read in chunks to avoid excessive memory usage for large files
-        while chunk := f.read(8192):
-            hasher.update(chunk)
+    src_dir = project_root / "src"
+    volumes.append((str(src_dir.resolve()), "/app/src", "ro"))
 
-    # Return first 16 characters (sufficient for version comparison)
-    return hasher.hexdigest()[:16]
+    tests_dir = project_root / "tests"
+    if tests_dir.exists():
+        volumes.append((str(tests_dir.resolve()), "/app/tests", "ro"))
 
-
-async def upload_code_to_sandbox(
-    sandbox: Any, force_upload: bool = False, contain_tests: bool = False
-) -> None:
-    """
-    Package and upload xagent code to sandbox to enable tool execution in the sandbox.
-
-    Args:
-        sandbox: Sandbox instance
-        force_upload: Whether to force upload (ignore version check)
-        contain_tests: Whether to include tests directory in the tar package
-    """
-    import tarfile
-    import tempfile
-
-    # Auto-detect xagent root directory
-    current_file = Path(__file__).resolve()
-
-    # Traverse up to find project root marker
-    xagent_root = None
-    for parent in list(current_file.parents):
-        # Check if project root marker file exists
-        if (parent / "pyproject.toml").exists():
-            # Verify src/xagent directory exists
-            if (parent / "src" / "xagent").exists():
-                xagent_root = str(parent)
-                logger.debug(f"Auto-detected xagent root: {xagent_root}")
-                break
-
-    if xagent_root is None:
-        raise RuntimeError("Could not auto-detect xagent root directory")
-
-    root_path = Path(xagent_root)
-
-    # Collect directories to package: always include src, optionally include tests
-    dirs_to_package: list[tuple[Path, str]] = [
-        (root_path / "src", "src"),
-    ]
-    if contain_tests:
-        tests_dir = root_path / "tests"
-        if tests_dir.exists():
-            dirs_to_package.append((tests_dir, "tests"))
-            logger.debug("Including tests directory in upload package")
-        else:
-            logger.warning("contain_tests=True but tests directory not found, skipping")
-
-    # Create temporary TAR file
-    with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
-        tar_path = tmp.name
-
-    try:
-        # Package code (without compression to ensure reproducible hash)
-        with tarfile.open(tar_path, "w") as tar:
-            for source_dir, prefix in dirs_to_package:
-                for root, dirs, files in os.walk(source_dir):
-                    # Skip unnecessary directories
-                    dirs[:] = [
-                        d
-                        for d in dirs
-                        if d
-                        not in {
-                            "__pycache__",
-                            ".git",
-                            ".venv",
-                            "node_modules",
-                            ".mypy_cache",
-                            ".pytest_cache",
-                            ".ruff_cache",
-                        }
-                    ]
-
-                    for file in files:
-                        # Skip unnecessary files
-                        if file.endswith((".pyc", ".pyo", ".pyd", ".so", ".DS_Store")):
-                            continue
-
-                        file_path = Path(root) / file
-                        # Calculate relative path with correct prefix
-                        # For src: src/xagent/... ; For tests: tests/...
-                        rel_path = file_path.relative_to(source_dir)
-                        arcname = f"{prefix}/{rel_path}"
-
-                        # Create TarInfo and set fixed timestamp (ensure reproducible hash)
-                        tarinfo = tar.gettarinfo(str(file_path), arcname=arcname)
-                        tarinfo.mtime = 0  # Fixed timestamp to 1970-01-01
-                        tarinfo.uid = 0
-                        tarinfo.gid = 0
-                        tarinfo.uname = ""
-                        tarinfo.gname = ""
-
-                        with open(file_path, "rb") as f:
-                            tar.addfile(tarinfo, f)
-
-        # Calculate TAR file hash
-        current_version = _calculate_tar_hash(tar_path)
-        tar_size = os.path.getsize(tar_path) / 1024 / 1024
-        logger.debug(f"TAR package created: {tar_size:.2f} MB, hash: {current_version}")
-
-        # Check version in sandbox (version file in /app directory)
-        if not force_upload:
-            version_check = await sandbox.exec("cat", "/app/.xagent_version")
-            if version_check.exit_code == 0:
-                sandbox_version = version_check.stdout.strip()
-                if sandbox_version == current_version:
-                    logger.info("Code already up-to-date in sandbox, skipping upload")
-                    return
-                logger.debug(
-                    f"Sandbox version mismatch: {sandbox_version} != {current_version}"
-                )
-
-        logger.info("Uploading code to sandbox...")
-
-        # upload to tmp
-        await sandbox.upload_file(tar_path, "/tmp/xagent_code.tar", overwrite=True)
-
-        logger.debug("Extracting TAR in sandbox...")
-
-        temp_dir = f"/tmp/xagent_src_{uuid.uuid4().hex[:8]}"
-        await sandbox.exec("mkdir", "-p", temp_dir)
-
-        # extract to tmp dir
-        result = await sandbox.exec(
-            "tar", "-xf", "/tmp/xagent_code.tar", "-C", temp_dir
-        )
-
-        if result.exit_code != 0:
-            error_msg = result.stderr or "Unknown error"
-            logger.error(f"Failed to extract TAR: {error_msg}")
-            raise RuntimeError(f"Failed to extract TAR: {error_msg}")
-
-        # Write version marker file to /app directory
-        await sandbox.write_file(
-            content=current_version,
-            remote_path="/app/.xagent_version",
-            overwrite=True,
-        )
-
-        # Code update
-        await sandbox.exec("mkdir", "-p", "/app")
-        await sandbox.exec("rm", "-rf", "/app/src")
-        result = await sandbox.exec("mv", f"{temp_dir}/src", "/app/src")
-
-        if result.exit_code != 0:
-            error_msg = result.stderr or "Unknown error"
-            logger.error(f"Failed to move src directory: {error_msg}")
-            raise RuntimeError(f"Failed to move src directory: {error_msg}")
-
-        # Move tests directory if included
-        if contain_tests:
-            await sandbox.exec("rm", "-rf", "/app/tests")
-            mv_tests = await sandbox.exec("mv", f"{temp_dir}/tests", "/app/tests")
-            if mv_tests.exit_code != 0:
-                logger.warning(
-                    f"Failed to move tests directory: {mv_tests.stderr or 'Unknown error'}"
-                )
-
-        # Clean up temp extraction dir
-        await sandbox.exec("rm", "-rf", temp_dir)
-
-        logger.info(f"Code uploaded successfully (version: {current_version})")
-
-        # clean up tmp file
-        await sandbox.exec("rm", "-f", "/tmp/xagent_code.tar")
-
-    finally:
-        # clean up tmp file
-        if os.path.exists(tar_path):
-            os.unlink(tar_path)
+    return volumes
