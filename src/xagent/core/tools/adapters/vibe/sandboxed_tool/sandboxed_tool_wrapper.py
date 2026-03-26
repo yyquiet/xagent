@@ -24,6 +24,9 @@ from .sandboxed_tool_config import get_sandbox_tool_config
 
 logger = logging.getLogger(__name__)
 
+# Base path where project source code is mounted inside the sandbox
+_SANDBOX_SRC_ROOT = "/app/src"
+
 
 def _extract_init_params(tool: AbstractBaseTool) -> dict[str, Any]:
     """Extract __init__ parameter values from a tool instance.
@@ -166,31 +169,18 @@ class SandboxedToolWrapper(AbstractBaseTool):
     def state_type(self) -> Optional[Type[BaseModel]]:
         return self._target.state_type()
 
-    def _generate_env_setup(self) -> str:
-        """
-        Generate environment variable setup code
+    def _build_execution_env(self) -> dict[str, str]:
+        """Build per-exec environment variables (scoped to this process, not the sandbox)."""
+        env = {"PYTHONPATH": _SANDBOX_SRC_ROOT}
 
-        Read configured environment variables from host and generate Python code
-        to set these variables in the sandbox
-
-        Returns:
-            Python code for environment variable setup
-        """
-        if not self._env_vars:
-            return ""
-
-        env_lines = []
         for env_var in self._env_vars:
-            # Read environment variable from host
             value = os.getenv(env_var)
             if value is not None:
-                # Use json.dumps for safe string encoding (handles \n, quotes, etc.)
-                env_lines.append(f"os.environ['{env_var}'] = {json.dumps(value)}")
+                env[env_var] = value
             else:
-                # Environment variable not found, log warning but don't interrupt execution
                 logger.warning(f"Environment variable {env_var} not found in host")
 
-        return "\n".join(env_lines)
+        return env
 
     async def _ensure_dependencies(self) -> None:
         """Ensure dependencies are installed in the sandbox.
@@ -276,89 +266,29 @@ class SandboxedToolWrapper(AbstractBaseTool):
             f"Configure 'tool_class' in sandboxed_tool_config.yml"
         )
 
-    def _generate_execution_script(
+    def _build_execution_command(
         self, args: Mapping[str, Any], result_file: str
-    ) -> str:
-        """
-        Generate Python script to execute tool in sandbox.
-
-        Uses tool_class strategy: Class().run_json_sync(args) or run_json_async(args)
-        When init params exists, use Class(**params).
-
-        Args:
-            args: Tool arguments
-            result_file: Result output file path
-
-        Returns:
-            Python execution script
-        """
+    ) -> list[str]:
+        """Build the sandbox command used to execute a tool runner."""
         import_path = self._resolve_execution_strategy()
-        module_path, name = import_path.rsplit(":", 1)
 
-        # Serialize arguments
         args_json = json.dumps(dict(args), ensure_ascii=False)
         args_b64 = base64.b64encode(args_json.encode("utf-8")).decode("ascii")
+        runner_path = f"{_SANDBOX_SRC_ROOT}/xagent/core/tools/adapters/vibe/sandboxed_tool/tool_runner.py"
 
-        # Generate environment variable setup code
-        env_setup = self._generate_env_setup()
-
+        command = [
+            "python",
+            runner_path,
+            "--tool-class",
+            import_path,
+            "--args-b64",
+            args_b64,
+            "--result-file",
+            result_file,
+        ]
         if self._init_params_b64 is not None:
-            execution_code = f"""
-import cloudpickle
-
-# Deserialize init params
-init_params_b64 = '{self._init_params_b64}'
-init_params = cloudpickle.loads(base64.b64decode(init_params_b64))
-
-# Import and reconstruct tool class with params
-from {module_path} import {name}
-tool = {name}(**init_params)
-
-# Execute via tool's run method
-import inspect
-if inspect.iscoroutinefunction(tool.run_json_async):
-    import asyncio
-    result = asyncio.run(tool.run_json_async(args))
-else:
-    result = tool.run_json_sync(args)
-"""
-        else:
-            execution_code = f"""
-# Import and reconstruct tool class
-from {module_path} import {name}
-tool = {name}()
-
-# Execute via tool's run method
-import inspect
-if inspect.iscoroutinefunction(tool.run_json_async):
-    import asyncio
-    result = asyncio.run(tool.run_json_async(args))
-else:
-    result = tool.run_json_sync(args)
-"""
-
-        script = f"""
-import base64
-import json
-import os
-import sys
-
-# Set environment variables
-{env_setup}
-
-# Add xagent to Python path
-sys.path.insert(0, '/app/src')
-
-# Decode and parse arguments
-args_b64 = '{args_b64}'
-args_json = base64.b64decode(args_b64).decode('utf-8')
-args = json.loads(args_json)
-{execution_code}
-# Write result to file
-with open('{result_file}', 'w', encoding='utf-8') as f:
-    json.dump(result, f, ensure_ascii=False)
-"""
-        return script
+            command.extend(["--init-params-b64", self._init_params_b64])
+        return command
 
     async def get_sandbox_for_test(self) -> Sandbox:
         """Get the sandbox for exec test"""
@@ -379,26 +309,12 @@ with open('{result_file}', 'w', encoding='utf-8') as f:
             # Ensure dependencies are installed
             await self._ensure_dependencies()
 
-            # Generate execution script
-            script = self._generate_execution_script(args, result_file)
-
-            # Write script to sandbox
-            script_path = f"/tmp/tool_execution_{uuid.uuid4().hex}.py"
-            await self._sandbox.write_file(
-                content=script,
-                remote_path=script_path,
-                overwrite=True,
-            )
-
             # Execute script in sandbox
             logger.debug(f"Executing tool {self._target.name} in sandbox")
-            result = await self._sandbox.exec("python", script_path)
-
-            # Clean up script path
-            try:
-                await self._sandbox.exec("rm", "-f", script_path)
-            except Exception:
-                pass
+            command = self._build_execution_command(args, result_file)
+            result = await self._sandbox.exec(
+                command[0], *command[1:], env=self._build_execution_env()
+            )
 
             # Check execution result
             if result.exit_code != 0:
@@ -502,7 +418,7 @@ def build_code_mount_volumes() -> list[tuple[str, str, str]]:
     volumes: list[tuple[str, str, str]] = []
 
     src_dir = project_root / "src"
-    volumes.append((str(src_dir.resolve()), "/app/src", "ro"))
+    volumes.append((str(src_dir.resolve()), _SANDBOX_SRC_ROOT, "ro"))
 
     tests_dir = project_root / "tests"
     if tests_dir.exists():
