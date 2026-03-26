@@ -22,6 +22,7 @@ from xagent.core.tools.adapters.vibe.javascript_executor import (
 )
 from xagent.core.tools.adapters.vibe.python_executor import PythonExecutorToolForBasic
 from xagent.core.tools.adapters.vibe.sandboxed_tool.sandboxed_tool_wrapper import (
+    _SANDBOX_SRC_ROOT,
     build_code_mount_volumes,
     create_sandboxed_tool,
 )
@@ -351,7 +352,7 @@ class TestTools:
                 "/app/tests/core/tools/test_python_executor.py",
                 "-v",
                 "--tb=short",
-                env={"PYTHONPATH": "/app/src"},
+                env={"PYTHONPATH": _SANDBOX_SRC_ROOT},
             )
 
             print(f"\n--- pytest stdout ---\n{test_result.stdout}")
@@ -430,7 +431,7 @@ class TestTools:
                 "--tb=short",
                 "-k",
                 "not TestJavaScriptExecutorTool",
-                env={"PYTHONPATH": "/app/src"},
+                env={"PYTHONPATH": _SANDBOX_SRC_ROOT},
             )
 
             print(f"\n--- pytest stdout ---\n{test_result.stdout}")
@@ -506,7 +507,7 @@ class TestTools:
                 "/app/tests/core/tools/test_command_executor.py",
                 "-v",
                 "--tb=short",
-                env={"PYTHONPATH": "/app/src"},
+                env={"PYTHONPATH": _SANDBOX_SRC_ROOT},
             )
 
             print(f"\n--- pytest stdout ---\n{test_result.stdout}")

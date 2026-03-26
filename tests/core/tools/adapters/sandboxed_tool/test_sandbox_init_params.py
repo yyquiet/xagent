@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from xagent.core.tools.adapters.vibe.base import AbstractBaseTool
 from xagent.core.tools.adapters.vibe.sandboxed_tool.sandboxed_tool_wrapper import (
+    _SANDBOX_SRC_ROOT,
     SandboxedToolWrapper,
     _extract_init_params,
     _serialize_init_params,
@@ -161,25 +162,60 @@ class TestSerializeInitParams:
             _serialize_init_params(params)
 
 
-class TestGenerateExecutionScript:
-    """Tests for _generate_execution_script()."""
+class TestBuildExecutionCommand:
+    """Tests for _build_execution_command()."""
 
     def test_with_init_params(self):
-        """Script should contain pickle deserialization when init params exist."""
+        """Command should include init params when they exist."""
         wrapper = _create_test_wrapper(_FakeToolWithWorkspace(workspace=None))
         with patch(_FAKE_CONFIG_PATH, return_value=_fake_config()):
-            script = wrapper._generate_execution_script(
+            command = wrapper._build_execution_command(
                 {"code": "print(1)"}, "/tmp/result.json"
             )
-        assert "cloudpickle.loads" in script
-        assert "**init_params" in script
+        assert command[:2] == [
+            "python",
+            f"{_SANDBOX_SRC_ROOT}/xagent/core/tools/adapters/vibe/sandboxed_tool/tool_runner.py",
+        ]
+        assert "--tool-class" in command
+        assert "some.module:FakeClass" in command
+        assert "--init-params-b64" in command
+        # Verify the b64 value can be deserialized
+        idx = command.index("--init-params-b64")
+        restored = cloudpickle.loads(base64.b64decode(command[idx + 1]))
+        assert restored == {"workspace": None}
 
     def test_without_init_params(self):
-        """Script should use no-arg construction when no init params."""
+        """Command should omit init params for no-arg tools."""
         wrapper = _create_test_wrapper(_FakeToolNoParams())
         with patch(_FAKE_CONFIG_PATH, return_value=_fake_config()):
-            script = wrapper._generate_execution_script(
+            command = wrapper._build_execution_command(
                 {"code": "print(1)"}, "/tmp/result.json"
             )
-        assert "cloudpickle.loads" not in script
-        assert "**init_params" not in script
+        assert "--init-params-b64" not in command
+
+
+class TestBuildExecutionEnv:
+    """Tests for _build_execution_env()."""
+
+    def test_always_includes_pythonpath(self):
+        wrapper = _create_test_wrapper(_FakeToolNoParams())
+        env = wrapper._build_execution_env()
+        assert env["PYTHONPATH"] == _SANDBOX_SRC_ROOT
+
+    def test_picks_up_host_env(self, monkeypatch):
+        monkeypatch.setenv("MY_API_KEY", "secret")
+        wrapper = _create_test_wrapper(_FakeToolNoParams())
+        wrapper._env_vars = ["MY_API_KEY"]
+        env = wrapper._build_execution_env()
+        assert env["MY_API_KEY"] == "secret"
+
+    def test_missing_env_var_warns(self, monkeypatch, caplog):
+        monkeypatch.delenv("NONEXISTENT_VAR", raising=False)
+        wrapper = _create_test_wrapper(_FakeToolNoParams())
+        wrapper._env_vars = ["NONEXISTENT_VAR"]
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            env = wrapper._build_execution_env()
+        assert "NONEXISTENT_VAR" not in env
+        assert "NONEXISTENT_VAR" in caplog.text
