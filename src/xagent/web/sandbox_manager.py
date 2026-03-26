@@ -87,7 +87,7 @@ class SandboxManager:
 
         return image, config
 
-    def _make_volumes(
+    def _make_default_volumes(
         self,
         lifecycle_type: str,
         lifecycle_id: str,
@@ -95,7 +95,10 @@ class SandboxManager:
         ensure_dir: bool,
     ) -> list[tuple[str, str, str]]:
         """
-        Build volume mounts: code (read-only) + user workspace (read-write).
+        Build default volume mounts.
+
+        Code directories are always mounted read-only.
+        User workspace is additionally mounted read-write for user lifecycle type.
 
         Args:
             lifecycle_type: e.g. task|user
@@ -155,13 +158,12 @@ class SandboxManager:
 
             template = SandboxTemplate(type="image", image=image)
 
-            # Merge user-specific volumes
-            user_volumes = self._make_volumes(
+            default_volumes = self._make_default_volumes(
                 lifecycle_type, lifecycle_id, ensure_dir=True
             )
-            if user_volumes:
-                existing_volumes = list(config.volumes) if config.volumes else []
-                config.volumes = existing_volumes + user_volumes
+            config_volumes = list(config.volumes) if config.volumes else []
+            # Merge volumes
+            config.volumes = config_volumes + default_volumes
 
             logger.debug(f"Getting or creating sandbox for: {sandbox_name}")
             sandbox = await self._service.get_or_create(
@@ -255,15 +257,13 @@ class SandboxManager:
 
                     # volumes comparison: None and empty list are treated as equal, ignore order
                     old_volumes = sb.config.volumes or []
-                    new_volumes = config.volumes or []
 
-                    # For user lifecycle type, add user-specific volumes for comparison
-                    if lifecycle_type == "user":
-                        expected_user_volumes = self._make_volumes(
-                            lifecycle_type, lifecycle_id, ensure_dir=False
-                        )
-                        if expected_user_volumes:
-                            new_volumes = list(new_volumes) + expected_user_volumes
+                    default_volumes = self._make_default_volumes(
+                        lifecycle_type, lifecycle_id, ensure_dir=False
+                    )
+                    config_volumes = list(config.volumes) if config.volumes else []
+                    # Merge volumes
+                    new_volumes = config_volumes + default_volumes
 
                     volumes_changed = set(old_volumes) != set(new_volumes)
 
