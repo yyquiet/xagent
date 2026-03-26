@@ -2483,6 +2483,7 @@ Build when you need.`
     llmResponse: "LLM Response",
     unknownTool: "Unknown Tool",
     executeTool: "Execute Tool: {tool}",
+    sandboxedExecution: "Safely sandboxed",
     toolExecutionFinished: "Tool Execution Finished",
     unknownError: "Unknown error",
     executionFailed: "Execution Failed",
