@@ -20,32 +20,47 @@ from pydantic import BaseModel
 from ......sandbox.base import Sandbox
 from .....workspace import TaskWorkspace
 from ..base import AbstractBaseTool, ToolMetadata
-from .sandboxed_tool_config import get_sandbox_tool_config
+from ..function import FunctionTool
+from .sandbox_config import (
+    extract_bound_method_target,
+    resolve_sandbox_config,
+)
 
 logger = logging.getLogger(__name__)
 
 # Base path where project source code is mounted inside the sandbox
 _SANDBOX_SRC_ROOT = "/app/src"
 
+_SANDBOX_BASE_DEPENDENCIES = [
+    "pydantic>=2.0.0",
+    "pydantic-settings",
+    "cloudpickle>=3.0.0",
+]
 
-def _extract_init_params(tool: AbstractBaseTool) -> dict[str, Any]:
-    """Extract __init__ parameter values from a tool instance.
 
-    Uses inspect.signature to get parameter names, then looks up
-    corresponding attribute values on the tool instance using the
-    naming convention: _name or name.
+def _extract_init_params(instance: Any) -> dict[str, Any]:
+    """Extract ``__init__`` parameter values from a tool or method-owner instance.
+
+    Uses ``inspect.signature`` to get parameter names from the class
+    ``__init__``, then looks up corresponding attribute values on the
+    instance using the naming convention: ``_name`` or ``name``.
+
+    *instance* is typed as ``Any`` because for the ``kind="method"``
+    path the caller passes the bound-method owner, which can be any
+    class instance — not necessarily an :class:`AbstractBaseTool`
+    subclass.
 
     Args:
-        tool: Tool instance to extract init params from
+        instance: Tool instance or bound-method owner to extract init params from.
 
     Returns:
         Dict mapping parameter name to its value.
-        Empty dict if tool has no init params (beyond self).
+        Empty dict if the class has no init params (beyond *self*).
     """
-    sig = inspect.signature(tool.__class__.__init__)
+    sig = inspect.signature(instance.__class__.__init__)
 
     params: dict[str, Any] = {}
-    instance_dict = getattr(tool, "__dict__", {})
+    instance_dict = getattr(instance, "__dict__", {})
     for name in sig.parameters:
         if name == "self":
             continue
@@ -58,11 +73,16 @@ def _extract_init_params(tool: AbstractBaseTool) -> dict[str, Any]:
                 break
         if not found:
             logger.warning(
-                f"Init param '{name}' not found on {tool.__class__.__name__} "
+                f"Init param '{name}' not found on {instance.__class__.__name__} "
                 f"(tried '_{name}' and '{name}'), skipping"
             )
 
     return params
+
+
+def _class_import_path(cls: type[Any]) -> str:
+    """Return stable import path for a top-level class."""
+    return f"{cls.__module__}:{cls.__name__}"
 
 
 def _serialize_init_params(params: dict[str, Any]) -> str | None:
@@ -126,22 +146,24 @@ class SandboxedToolWrapper(AbstractBaseTool):
         self._sandbox = sandbox
         self._sandbox_key = sandbox.name
 
-        # Load dependencies and environment variables from config module
-        base_requirements = [
-            "pydantic>=2.0.0",
-            "pydantic-settings",
-            "cloudpickle>=3.0.0",
-        ]
-        tool_config = get_sandbox_tool_config(target_tool.name)
-        self._requirements = base_requirements + tool_config.packages
-        self._env_vars = tool_config.env_vars
+        sandbox_config = resolve_sandbox_config(target_tool)
+        if sandbox_config is None or not sandbox_config.enabled:
+            raise RuntimeError(
+                f"Tool '{target_tool.name}' is not configured for sandbox runtime."
+            )
+
+        # base dependencies + tool dependencies
+        self._requirements = _SANDBOX_BASE_DEPENDENCIES + list(sandbox_config.packages)
+        self._env_vars = list(sandbox_config.env_vars)
 
         # Proxy target tool attributes
         self._visibility = getattr(target_tool, "_visibility", None)
         self._allow_users = getattr(target_tool, "_allow_users", None)
 
+        self._execution_spec, reconstruction_target = self._resolve_execution_spec()
+
         # Extract and serialize init params for sandbox reconstruction
-        init_params = _extract_init_params(target_tool)
+        init_params = _extract_init_params(reconstruction_target)
         self._init_params_b64 = _serialize_init_params(init_params)
 
     @property
@@ -252,40 +274,59 @@ class SandboxedToolWrapper(AbstractBaseTool):
                 logger.error(f"Error installing dependencies: {e}")
                 raise
 
-    def _resolve_execution_strategy(self) -> str:
+    def _resolve_execution_spec(self) -> tuple[dict[str, str], Any]:
         """
         Resolve how to execute the tool in sandbox.
 
         Returns:
-            tool_class import path (e.g. "module.path:ClassName")
+            Execution spec and the instance whose init params should be serialized.
         """
-        from .sandboxed_tool_config import get_sandbox_tool_config
+        if isinstance(self._target, FunctionTool):
+            function_target = extract_bound_method_target(self._target)
+            if function_target is not None:
+                instance, method_name = function_target
+                return (
+                    {
+                        "kind": "method",
+                        "tool_class": _class_import_path(instance.__class__),
+                        "method_name": method_name,
+                    },
+                    instance,
+                )
 
-        config = get_sandbox_tool_config(self._target.name)
+            raise RuntimeError(
+                f"FunctionTool '{self._target.name}' uses a closure or unsupported "
+                "callable form that cannot be reconstructed in sandbox automatically."
+            )
 
-        if config.tool_class:
-            return config.tool_class
-
-        raise RuntimeError(
-            f"Cannot determine execution strategy for tool '{self._target.name}'. "
-            f"Configure 'tool_class' in sandboxed_tool_config.yml"
+        return (
+            {
+                "kind": "tool",
+                "tool_class": _class_import_path(self._target.__class__),
+            },
+            self._target,
         )
 
     def _build_execution_command(
         self, args: Mapping[str, Any], result_file: str
     ) -> list[str]:
         """Build the sandbox command used to execute a tool runner."""
-        import_path = self._resolve_execution_strategy()
-
         args_json = json.dumps(dict(args), ensure_ascii=False)
         args_b64 = base64.b64encode(args_json.encode("utf-8")).decode("ascii")
-        runner_path = f"{_SANDBOX_SRC_ROOT}/xagent/core/tools/adapters/vibe/sandboxed_tool/tool_runner.py"
+        execution_spec_json = json.dumps(self._execution_spec, ensure_ascii=False)
+        execution_spec_b64 = base64.b64encode(
+            execution_spec_json.encode("utf-8")
+        ).decode("ascii")
+        runner_path = (
+            f"{_SANDBOX_SRC_ROOT}/xagent/core/tools/adapters/vibe/sandboxed_tool/"
+            "tool_runner.py"
+        )
 
         command = [
             "python",
             runner_path,
-            "--tool-class",
-            import_path,
+            "--execution-spec-b64",
+            execution_spec_b64,
             "--args-b64",
             args_b64,
             "--result-file",
