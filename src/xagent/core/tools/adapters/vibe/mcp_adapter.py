@@ -11,9 +11,14 @@ from typing import Any, Dict, List, Mapping, Optional, Type
 from mcp.types import Tool as MCPTool
 from pydantic import BaseModel, Field, create_model
 
-from .....web.user_context import UserContext
+from .....sandbox.base import Sandbox
 from ...core.mcp.sessions import Connection, create_session
+from ...core.mcp.tools import load_mcp_tools
 from .base import AbstractBaseTool, ToolVisibility
+from .sandboxed_tool.sandboxed_mcp_tool_helper import (
+    load_sandboxed_mcp_tools,
+    should_sandbox_mcp_connection,
+)
 
 
 class EmptyArgsModel(BaseModel):
@@ -202,6 +207,9 @@ class MCPToolAdapter(AbstractBaseTool):
             )
 
             # Set user context for execution
+            # Lazy import to avoid core → web layer dependency at module level.
+            from .....web.user_context import UserContext
+
             user_context = UserContext(current_user_id)
 
             with user_context.set_context():
@@ -297,13 +305,76 @@ class MCPToolAdapter(AbstractBaseTool):
             return str(value)
 
 
+def _build_mcp_tool_adapter(
+    server_name: str,
+    connection: Connection,
+    mcp_tool: MCPTool,
+    *,
+    name_prefix: str = "mcp_",
+    visibility: Optional[ToolVisibility] = None,
+    allow_users: Optional[List[str]] = None,
+) -> MCPToolAdapter:
+    """Create MCP tool adapter."""
+    # Create tool name with server prefix
+    tool_prefix = f"{name_prefix}{server_name}_" if name_prefix else f"{server_name}_"
+
+    return MCPToolAdapter(
+        mcp_tool=mcp_tool,
+        connection=connection,
+        name_prefix=tool_prefix,
+        visibility=visibility,
+        allow_users=allow_users,
+    )
+
+
+async def _load_direct_mcp_tools(
+    server_name: str,
+    connection: Connection,
+    *,
+    name_prefix: str,
+    visibility: Optional[ToolVisibility],
+    allow_users: Optional[List[str]],
+) -> list[AbstractBaseTool]:
+    """Load MCP tools directly on the host."""
+    agent_tools: list[AbstractBaseTool] = []
+
+    # Create session and list tools
+    async with create_session(connection) as session:
+        await session.initialize()
+
+        # List available tools with pagination support
+        mcp_tools = await load_mcp_tools(session)
+
+        # Convert each MCP tool to Agent tool
+        for mcp_tool in mcp_tools:
+            try:
+                adapter = _build_mcp_tool_adapter(
+                    server_name,
+                    connection,
+                    mcp_tool,
+                    name_prefix=name_prefix,
+                    visibility=visibility,
+                    allow_users=allow_users,
+                )
+
+                agent_tools.append(adapter)
+                logger.debug(f"Created adapter for tool: {adapter.name}")
+
+            except Exception as e:
+                logger.error(f"Failed to create adapter for tool {mcp_tool.name}: {e}")
+                continue
+
+    return agent_tools
+
+
 async def load_mcp_tools_as_agent_tools(
     connection_map: Dict[str, Connection],
     *,
     name_prefix: str = "mcp_",
     visibility: Optional[ToolVisibility] = None,
     allow_users: Optional[List[str]] = None,
-) -> List[MCPToolAdapter]:
+    sandbox: Sandbox | None = None,
+) -> List[AbstractBaseTool]:
     """Load MCP tools from multiple servers and convert to Agent tools.
 
     Args:
@@ -311,55 +382,49 @@ async def load_mcp_tools_as_agent_tools(
         name_prefix: Prefix for tool names (default: "mcp_")
         visibility: Tool visibility setting
         allow_users: List of allowed user IDs
+        sandbox: Optional sandbox instance. When provided, stdio connections
+            using npx/uvx will be routed through the sandbox for isolation.
 
     Returns:
-        List of MCPToolAdapter instances
+        List of MCP-backed agent tools, including sandboxed wrappers when needed
 
     Raises:
         Exception: If any MCP server connection fails
     """
-    agent_tools: List[MCPToolAdapter] = []
+    agent_tools: List[AbstractBaseTool] = []
 
     for server_name, connection in connection_map.items():
         try:
             logger.info(f"Loading tools from MCP server: {server_name}")
+            if sandbox is not None and should_sandbox_mcp_connection(connection):
+                _sn, _conn = server_name, connection
 
-            # Create session and list tools
-            async with create_session(connection) as session:
-                await session.initialize()
+                def tool_builder(mcp_tool: MCPTool) -> MCPToolAdapter:
+                    return _build_mcp_tool_adapter(
+                        _sn,
+                        _conn,
+                        mcp_tool,
+                        name_prefix=name_prefix,
+                        visibility=visibility,
+                        allow_users=allow_users,
+                    )
 
-                # List available tools
-                tools_result = await session.list_tools()
-                mcp_tools = tools_result.tools if tools_result.tools else []
+                server_tools = await load_sandboxed_mcp_tools(
+                    connection,
+                    sandbox,
+                    tool_builder,
+                )
+            else:
+                server_tools = await _load_direct_mcp_tools(
+                    server_name,
+                    connection,
+                    name_prefix=name_prefix,
+                    visibility=visibility,
+                    allow_users=allow_users,
+                )
 
-                logger.info(f"Found {len(mcp_tools)} tools from server {server_name}")
-
-                # Convert each MCP tool to Agent tool
-                for mcp_tool in mcp_tools:
-                    try:
-                        # Create tool name with server prefix
-                        tool_prefix = (
-                            f"{name_prefix}{server_name}_"
-                            if name_prefix
-                            else f"{server_name}_"
-                        )
-
-                        adapter = MCPToolAdapter(
-                            mcp_tool=mcp_tool,
-                            connection=connection,
-                            name_prefix=tool_prefix,
-                            visibility=visibility,
-                            allow_users=allow_users,
-                        )
-
-                        agent_tools.append(adapter)
-                        logger.debug(f"Created adapter for tool: {adapter.name}")
-
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to create adapter for tool {mcp_tool.name}: {e}"
-                        )
-                        continue
+            agent_tools.extend(server_tools)
+            logger.info(f"Found {len(server_tools)} tools from server {server_name}")
 
         except Exception as e:
             logger.error(f"Failed to load tools from MCP server {server_name}: {e}")

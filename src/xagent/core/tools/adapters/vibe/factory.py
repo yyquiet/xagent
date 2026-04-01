@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 if TYPE_CHECKING:
-    pass
+    from .....sandbox.base import Sandbox
 
 from ....workspace import TaskWorkspace
 from .base import Tool
@@ -277,6 +277,7 @@ class ToolFactory:
     @staticmethod
     async def _create_mcp_tools_from_configs(
         mcp_configs: List[Dict[str, Any]],
+        sandbox: Optional["Sandbox"] = None,
     ) -> List[Tool]:
         """Create MCP tools from configurations."""
         try:
@@ -312,7 +313,10 @@ class ToolFactory:
                 connections[config["name"]] = connection_config
 
             # Load MCP tools
-            mcp_tools = await load_mcp_tools_as_agent_tools(connections)  # type: ignore[arg-type]
+            mcp_tools = await load_mcp_tools_as_agent_tools(
+                connections,
+                sandbox=sandbox,
+            )  # type: ignore[arg-type]
             return mcp_tools if mcp_tools else []  # type: ignore[return-value]
         except Exception as e:
             logger.warning(f"Failed to create MCP tools: {e}")
