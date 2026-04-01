@@ -24,6 +24,49 @@ from .base import BaseLLM
 logger = logging.getLogger(__name__)
 
 
+def _handle_union_type(schema: Dict[str, Any], union_key: str) -> Dict[str, Any]:
+    """Simplify anyOf/oneOf for Claude API compatibility.
+
+    Claude doesn't support anyOf/oneOf, so we resolve to a single concrete type:
+    - Optional[T] → T
+    - Union[str, List[str]] → array of strings
+    - Otherwise → first option
+    """
+    options = schema[union_key]
+    if not isinstance(options, list) or not options:
+        schema = {"type": "string"}
+        schema.pop(union_key, None)
+        return schema
+
+    has_null = any(
+        opt.get("type") == "null" or opt is None
+        for opt in options
+        if isinstance(opt, dict)
+    )
+    if has_null and len(options) == 2:
+        # Optional[T] — use the non-null type
+        for opt in options:
+            if isinstance(opt, dict) and opt.get("type") != "null":
+                result = _fix_pydantic_schema_for_claude(opt)
+                schema = (
+                    result.copy() if isinstance(result, dict) else {"type": "string"}
+                )
+                break
+    elif len(options) == 2:
+        types = [opt.get("type") for opt in options if isinstance(opt, dict)]
+        if set(types) == {"string", "array"}:
+            schema = {"type": "array", "items": {"type": "string"}}
+        else:
+            first_option = options[0] if isinstance(options[0], dict) else {}
+            schema = _fix_pydantic_schema_for_claude(first_option)
+    else:
+        first_option = options[0] if isinstance(options[0], dict) else {}
+        schema = _fix_pydantic_schema_for_claude(first_option)
+
+    schema.pop(union_key, None)
+    return schema
+
+
 def _fix_pydantic_schema_for_claude(schema: Dict[str, Any]) -> Dict[str, Any]:
     """
     Fix Pydantic-generated schema for Claude API compatibility.
@@ -32,6 +75,7 @@ def _fix_pydantic_schema_for_claude(schema: Dict[str, Any]) -> Dict[str, Any]:
     1. All object types must have additionalProperties: false (not true or omitted)
     2. Number/integer types cannot have: minimum, maximum, exclusiveMinimum, exclusiveMaximum
     3. Empty schemas {} are not supported - must specify a concrete type
+    4. anyOf/oneOf are not supported - must choose a concrete type
 
     Pydantic's model_json_schema() may add these unsupported properties, so we remove them.
 
@@ -48,6 +92,13 @@ def _fix_pydantic_schema_for_claude(schema: Dict[str, Any]) -> Dict[str, Any]:
     if not schema or len(schema) == 0:
         # Default to object type with no properties
         return {"type": "object", "properties": {}, "additionalProperties": False}
+
+    # Handle anyOf/oneOf - Claude doesn't support these
+    # We need to simplify to a single type
+    for union_key in ("anyOf", "oneOf"):
+        if union_key in schema:
+            schema = _handle_union_type(schema, union_key)
+            break  # Only process the first match
 
     # If this is an object type, add additionalProperties: false
     if schema.get("type") == "object":
@@ -273,11 +324,25 @@ class ClaudeLLM(BaseLLM):
             parameters = function.get("parameters", {})
             strict = tool.get("strict", False)
 
+            # Debug: log before fixing
+            logger.debug(
+                f"[Claude] Converting tool: {name}, original parameters: {str(parameters)[:200]}"
+            )
+
+            # Fix Pydantic-generated schema for Claude API compatibility
+            # This handles anyOf, oneOf, etc. which Claude doesn't support
+            fixed_parameters = _fix_pydantic_schema_for_claude(parameters.copy())
+
+            # Debug: log after fixing
+            logger.debug(
+                f"[Claude] Fixed tool: {name}, fixed parameters: {str(fixed_parameters)[:200]}"
+            )
+
             # Convert to Anthropic tool format
             anthropic_tool = {
                 "name": name,
                 "description": description,
-                "input_schema": parameters,
+                "input_schema": fixed_parameters,
             }
 
             # Add strict mode if specified
@@ -285,6 +350,11 @@ class ClaudeLLM(BaseLLM):
                 anthropic_tool["strict"] = True
 
             anthropic_tools.append(anthropic_tool)
+
+        # Debug: log final anthropic tools
+        logger.debug(
+            f"[Claude] Final Anthropic tools being sent to API: {json.dumps(anthropic_tools, ensure_ascii=False)[:1000]}"
+        )
 
         return anthropic_tools
 
@@ -703,6 +773,11 @@ class ClaudeLLM(BaseLLM):
             )
 
             # Process streaming response
+            # Note: We manually parse events instead of using SDK's tool parsing because:
+            # 1. We need real-time streaming with per-event processing
+            # 2. We need custom timeout controls during streaming
+            # 3. We need unified StreamChunk format across different LLM providers
+            # 4. We need to handle tool calls incrementally as they stream in
             async for event in stream:
                 current_time = time.time()
 
@@ -758,11 +833,31 @@ class ClaudeLLM(BaseLLM):
                             )
                         elif delta.type == "input_json_delta":
                             # Tool arguments update
-                            tool_id = (
-                                event.index
-                                if hasattr(event, "index")
-                                else list(accumulated_tool_calls.keys())[0]
-                            )
+                            # IMPORTANT: event.index is an INTEGER (content block position 0, 1, 2, ...)
+                            # NOT the tool_id string (like "toolu_01GK595WLP7ewvoLiMRV6sG4")
+                            # We must use event.index to look up the correct tool_id
+                            if hasattr(event, "index") and accumulated_tool_calls:
+                                # Get tool_id by index (event.index is the position in content blocks)
+                                tool_ids = list(accumulated_tool_calls.keys())
+                                if 0 <= event.index < len(tool_ids):
+                                    tool_id = tool_ids[event.index]
+                                else:
+                                    # Fallback to first tool if index is out of range
+                                    logger.warning(
+                                        f"event.index {event.index} out of range [0, {len(tool_ids)}), using first tool"
+                                    )
+                                    tool_id = tool_ids[0]
+                            else:
+                                # Fallback to first tool if no index
+                                if accumulated_tool_calls:
+                                    logger.warning("No event.index, using first tool")
+                                    tool_id = list(accumulated_tool_calls.keys())[0]
+                                else:
+                                    logger.warning(
+                                        "No event.index and accumulated_tool_calls is empty, skipping chunk"
+                                    )
+                                    continue
+
                             if tool_id in accumulated_tool_calls:
                                 args = (
                                     delta.partial_json
@@ -770,6 +865,10 @@ class ClaudeLLM(BaseLLM):
                                     else ""
                                 )
                                 accumulated_tool_calls[tool_id]["arguments"] += args
+                            else:
+                                logger.warning(
+                                    f"tool_id {tool_id} not found in accumulated_tool_calls"
+                                )
 
                 elif event.type == "content_block_stop":
                     # End of content block

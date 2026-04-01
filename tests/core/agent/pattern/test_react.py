@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import pytest
@@ -6,6 +7,7 @@ from xagent.core.agent.context import AgentContext
 from xagent.core.agent.pattern.react import ReActPattern
 from xagent.core.memory.base import MemoryResponse, MemoryStore
 from xagent.core.model.chat.basic.base import BaseLLM
+from xagent.core.model.chat.types import ChunkType, StreamChunk
 from xagent.core.tools.adapters.vibe import Tool, ToolMetadata
 
 
@@ -39,6 +41,57 @@ class MockReActLLM(BaseLLM):
 
         # Default final answer matching new Action schema
         return '{"type": "final_answer", "reasoning": "Task completed successfully", "answer": "Task completed successfully", "success": true, "error": null}'
+
+    async def stream_chat(self, messages: list[dict[str, str]], **kwargs):
+        """Stream chat implementation for testing native tool calling."""
+        if self.call_count >= len(self.responses):
+            # Default response
+            response_json = {
+                "type": "final_answer",
+                "reasoning": "Task completed successfully",
+                "answer": "Task completed successfully",
+                "success": True,
+                "error": None,
+            }
+        else:
+            # Parse the response
+            response_text = self.responses[self.call_count]
+            self.call_count += 1
+            try:
+                response_json = json.loads(response_text)
+            except json.JSONDecodeError:
+                # If not JSON, return as-is (for invalid JSON tests)
+                yield StreamChunk(
+                    type=ChunkType.TOKEN, content=response_text, delta=response_text
+                )
+                yield StreamChunk(type=ChunkType.END, finish_reason="stop")
+                return
+
+        # Check if this is a tool call
+        if response_json.get("type") == "tool_call":
+            # Return native tool call format
+            tool_name = response_json.get("tool_name", "")
+            tool_args = response_json.get("tool_args", {})
+
+            yield StreamChunk(
+                type=ChunkType.TOOL_CALL,
+                content="",
+                delta="",
+                tool_calls=[
+                    {
+                        "function": {
+                            "name": tool_name,
+                            "arguments": json.dumps(tool_args),
+                        }
+                    }
+                ],
+            )
+            yield StreamChunk(type=ChunkType.END, finish_reason="tool_calls")
+        else:
+            # Return full JSON as text (for final_answer with all fields)
+            full_json = json.dumps(response_json, ensure_ascii=False)
+            yield StreamChunk(type=ChunkType.TOKEN, content=full_json, delta=full_json)
+            yield StreamChunk(type=ChunkType.END, finish_reason="stop")
 
 
 class MockCalculatorTool(Tool):
@@ -110,7 +163,11 @@ class DummyMemoryStore(MemoryStore):
 async def test_react_basic_execution():
     """Test basic ReAct pattern execution"""
     responses = [
-        '{"type": "tool_call", "reasoning": "I need to calculate 2+2", "tool_name": "calculator", "tool_args": {"expression": "2+2"}}',
+        # First call: return action type
+        '{"type": "tool_call", "reasoning": "I need to calculate 2+2"}',
+        # Second call: return native tool call
+        '{"type": "tool_call", "reasoning": "Calling calculator", "tool_name": "calculator", "tool_args": {"expression": "2+2"}}',
+        # Third call: return final answer
         '{"type": "final_answer", "reasoning": "The calculation is complete", "answer": "The result is 4", "success": true, "error": null}',
     ]
 
@@ -128,7 +185,7 @@ async def test_react_basic_execution():
 
     assert result["success"] is True
     assert result["output"] == "The result is 4"
-    assert result["iterations"] == 2
+    assert result["iterations"] == 2  # Still 2 iterations (tool_call + final_answer)
     assert "execution_history" in result
 
 
@@ -166,7 +223,11 @@ async def test_react_with_context():
 async def test_react_tool_execution():
     """Test ReAct pattern with tool execution"""
     responses = [
-        '{"type": "tool_call", "reasoning": "I need to calculate something", "tool_name": "calculator", "tool_args": {"expression": "10*5"}}',
+        # First call: return action type
+        '{"type": "tool_call", "reasoning": "I need to calculate something"}',
+        # Second call: return native tool call
+        '{"type": "tool_call", "reasoning": "Calling calculator", "tool_name": "calculator", "tool_args": {"expression": "10*5"}}',
+        # Third call: return final answer
         '{"type": "final_answer", "reasoning": "The calculation is complete", "answer": "The calculation result is 50", "success": true, "error": null}',
     ]
 
@@ -191,10 +252,16 @@ async def test_react_tool_execution():
 async def test_react_max_iterations():
     """Test ReAct pattern hitting max iterations"""
     # Return tool calls that never lead to final answer
+    # Each iteration now requires 2 calls: action type + native tool call
     responses = [
-        '{"type": "tool_call", "reasoning": "I need to calculate something", "tool_name": "calculator", "tool_args": {"expression": "1+1"}}',
-        '{"type": "tool_call", "reasoning": "I need to calculate more", "tool_name": "calculator", "tool_args": {"expression": "2+2"}}',
-        '{"type": "tool_call", "reasoning": "Still calculating", "tool_name": "calculator", "tool_args": {"expression": "3+3"}}',
+        # Iteration 1, call 1: action type
+        '{"type": "tool_call", "reasoning": "I need to calculate something"}',
+        # Iteration 1, call 2: native tool call
+        '{"type": "tool_call", "reasoning": "Calling calculator", "tool_name": "calculator", "tool_args": {"expression": "1+1"}}',
+        # Iteration 2, call 1: action type
+        '{"type": "tool_call", "reasoning": "I need to calculate more"}',
+        # Iteration 2, call 2: native tool call
+        '{"type": "tool_call", "reasoning": "Still calculating", "tool_name": "calculator", "tool_args": {"expression": "2+2"}}',
     ]
 
     llm = MockReActLLM(responses)
@@ -213,11 +280,10 @@ async def test_react_max_iterations():
 
 @pytest.mark.asyncio
 async def test_react_invalid_json():
-    """Test ReAct pattern with invalid JSON response - should retry and eventually fail with MaxIterationsError"""
+    """Test ReAct pattern with invalid JSON response"""
+    # In native tool calling mode, text responses are treated as final_answer
     responses = [
-        "invalid json response",  # Invalid JSON triggers retry
-        "invalid json response",  # Invalid JSON triggers retry
-        "invalid json response",  # Invalid JSON triggers retry
+        "invalid json response",  # Treated as direct text response -> final_answer
     ]
 
     llm = MockReActLLM(responses)
@@ -225,8 +291,6 @@ async def test_react_invalid_json():
     tools = [MockCalculatorTool()]
     pattern = ReActPattern(llm, max_iterations=3)
 
-    # With new retry logic, invalid JSON triggers retries until max_iterations
-    # The default final answer will be used after exhausting responses
     result = await pattern.run(
         task="Test invalid response",
         memory=memory,
@@ -234,16 +298,20 @@ async def test_react_invalid_json():
         context=AgentContext(),
     )
 
-    # Should complete successfully after retries using default final answer
+    # Should complete with the text response as final answer
     assert result["success"] is True
-    assert result["output"] == "Task completed successfully"
+    assert result["output"] == "invalid json response"
 
 
 @pytest.mark.asyncio
 async def test_react_tool_not_found():
     """Test ReAct pattern with non-existent tool"""
     responses = [
-        '{"type": "tool_call", "reasoning": "Trying to use non-existent tool", "tool_name": "nonexistent", "tool_args": {}}',
+        # First call: action type
+        '{"type": "tool_call", "reasoning": "Trying to use non-existent tool"}',
+        # Second call: native tool call with non-existent tool
+        '{"type": "tool_call", "reasoning": "Calling nonexistent", "tool_name": "nonexistent", "tool_args": {}}',
+        # Third call: final answer after tool failure
         '{"type": "final_answer", "reasoning": "Could not complete task due to missing tool", "answer": "Could not complete task due to missing tool"}',
     ]
 
@@ -293,8 +361,15 @@ async def test_react_none_response():
 async def test_react_self_reflection():
     """Test ReAct pattern with self-reflection on failure"""
     responses = [
-        '{"type": "tool_call", "reasoning": "Trying calculator", "tool_name": "calculator", "tool_args": {"expression": "invalid expression"}}',
-        '{"type": "tool_call", "reasoning": "The previous action failed, let me try a different approach", "tool_name": "calculator", "tool_args": {"expression": "2+2"}}',
+        # Iteration 1, call 1: action type
+        '{"type": "tool_call", "reasoning": "Trying calculator"}',
+        # Iteration 1, call 2: native tool call (will fail)
+        '{"type": "tool_call", "reasoning": "Calling calculator with invalid expr", "tool_name": "calculator", "tool_args": {"expression": "invalid expression"}}',
+        # Iteration 2, call 1: action type
+        '{"type": "tool_call", "reasoning": "The previous action failed, let me try a different approach"}',
+        # Iteration 2, call 2: native tool call
+        '{"type": "tool_call", "reasoning": "Calling calculator with valid expr", "tool_name": "calculator", "tool_args": {"expression": "2+2"}}',
+        # Final answer
         '{"type": "final_answer", "reasoning": "After retrying, the answer is 4", "answer": "After retrying, the answer is 4"}',
     ]
 
@@ -450,8 +525,10 @@ async def test_react_failure_detection_with_context():
 
 @pytest.mark.asyncio
 async def test_react_truncated_json():
-    """Test ReAct pattern with truncated JSON response - should be repaired"""
+    """Test ReAct pattern with truncated JSON response in native tool calling mode"""
     # Truncated JSON (missing closing brace)
+    # json_repair can repair this by adding the missing brace, so it becomes valid tool_call
+    # This triggers a second call which returns the default final_answer
     truncated_json = '{"type": "tool_call", "reasoning": "I need to calculate", "tool_name": "calculator", "tool_args": {"expression": "2+2"'
 
     responses = [truncated_json]
@@ -461,7 +538,6 @@ async def test_react_truncated_json():
     tools = [MockCalculatorTool()]
     pattern = ReActPattern(llm, max_iterations=3)
 
-    # JSON is repaired
     result = await pattern.run(
         task="Test truncated JSON",
         memory=memory,
@@ -469,9 +545,49 @@ async def test_react_truncated_json():
         context=AgentContext(),
     )
 
+    # json_repair repairs the truncated JSON to valid tool_call
+    # which triggers second call that returns default final_answer
     assert result["success"] is True
     assert result["output"] == "Task completed successfully"
     assert "execution_history" in result
+
+
+@pytest.mark.asyncio
+async def test_react_multiple_json_objects():
+    """Test ReAct pattern with multiple JSON objects - should select first one"""
+
+    # Multiple JSON objects concatenated - gpt-5.4 behavior in streaming mode
+    # First JSON is tool_call, second is something else (code), third is final_answer
+    multiple_jsons = '{"type": "tool_call", "reasoning": "Need to calculate"}{"code":"import random","capture_output":true}{"type": "final_answer", "reasoning": "Done", "answer": "Result"}'
+
+    # Override stream_chat to return multiple JSONs
+    class AlwaysMultipleJSONsLLM(MockReActLLM):
+        async def stream_chat(self, messages, **kwargs):
+            # Always return multiple JSONs
+            yield StreamChunk(
+                type=ChunkType.TOKEN, content=multiple_jsons, delta=multiple_jsons
+            )
+            yield StreamChunk(type=ChunkType.END, finish_reason="stop")
+
+    llm = AlwaysMultipleJSONsLLM([])
+    memory = DummyMemoryStore()
+    tools = [MockCalculatorTool()]
+    pattern = ReActPattern(
+        llm, max_iterations=1
+    )  # Only 1 iteration to avoid retry loop
+
+    # Should fail because first JSON (tool_call) doesn't have tool_name/tool_args
+    # This will cause second call to fail with "LLM did not invoke native tool calling"
+    # After max_iterations is reached, it should raise MaxIterationsError
+    from xagent.core.agent.exceptions import MaxIterationsError
+
+    with pytest.raises(MaxIterationsError):
+        await pattern.run(
+            task="Test multiple JSONs",
+            memory=memory,
+            tools=tools,
+            context=AgentContext(),
+        )
 
 
 @pytest.mark.asyncio
