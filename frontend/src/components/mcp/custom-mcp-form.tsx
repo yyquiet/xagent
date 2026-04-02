@@ -3,6 +3,8 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { Select } from "@/components/ui/select"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Info } from "lucide-react"
 import { useI18n } from "@/contexts/i18n-context"
 
 interface CustomMcpFormProps {
@@ -75,16 +77,26 @@ export function CustomMcpForm({
                 placeholder={field.placeholder}
               />
             ) : (
-              <Input
-                id={field.name}
-                type={field.type === 'number' ? 'number' : 'text'}
-                value={mcpFormData.config[field.name] || ''}
-                onChange={(e) => setMcpFormData((prev: any) => ({
-                  ...prev,
-                  config: { ...prev.config, [field.name]: field.type === 'number' ? Number(e.target.value) : e.target.value }
-                }))}
-                placeholder={field.placeholder}
-              />
+              <>
+                <Input
+                  id={field.name}
+                  type={field.type === 'number' ? 'number' : 'text'}
+                  value={mcpFormData.config[field.name] || ''}
+                  onChange={(e) => setMcpFormData((prev: any) => ({
+                    ...prev,
+                    config: { ...prev.config, [field.name]: field.type === 'number' ? Number(e.target.value) : e.target.value }
+                  }))}
+                  placeholder={field.placeholder}
+                />
+                {mcpFormData.transport === 'stdio' && field.name === 'command' && (
+                  <Alert className="border-amber-200 bg-amber-50 text-amber-900">
+                    <Info className="h-4 w-4 text-amber-700" />
+                    <AlertDescription className="text-amber-800">
+                      {t('tools.mcp.form.stdioSandboxHint')}
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </>
             )}
           </div>
         ));
