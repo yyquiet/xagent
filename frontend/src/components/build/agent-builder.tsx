@@ -12,7 +12,7 @@ import { ChatInput } from "@/components/chat/ChatInput"
 import { ChatMessage } from "@/components/chat/ChatMessage"
 import { apiRequest } from "@/lib/api-wrapper"
 import { getApiUrl, getWsUrl } from "@/lib/utils"
-import { PlusCircle, MessageSquare, Upload, Download, Settings2, Check, Zap, BookOpen, ChevronLeft, Sparkles, Loader2 } from "lucide-react"
+import { PlusCircle, MessageSquare, Upload, Download, Settings2, Check, Zap, BookOpen, ChevronLeft, Sparkles, Loader2, Trash2 } from "lucide-react"
 import { useI18n } from "@/contexts/i18n-context"
 import { useAuth } from "@/contexts/auth-context"
 import { FileAttachment } from "@/components/file/file-attachment"
@@ -269,6 +269,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
   }, [t])
 
   const [isChatLoading, setIsChatLoading] = useState(false)
+  const [taskStatus, setTaskStatus] = useState<"idle" | "running" | "paused">("idle")
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [files, setFiles] = useState<File[]>([])
@@ -318,6 +319,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
             // Handle different message types
             if (message.type === 'preview_started') {
               setIsChatLoading(true)
+              setTaskStatus('running')
               previewStepsRef.current = []
               traceEventsRef.current = []
               // Add a placeholder message for the assistant response
@@ -327,6 +329,10 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
                 traceEvents: [],
                 timestamp: Date.now()
               }])
+            } else if (message.type === 'task_paused') {
+              setTaskStatus('paused')
+            } else if (message.type === 'task_resumed') {
+              setTaskStatus('running')
             } else if (message.type === 'trace_event') {
               // Collect trace events and steps
               traceEventsRef.current.push(message)
@@ -348,6 +354,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
               })
             } else if (message.type === 'task_completed') {
               setIsChatLoading(false)
+              setTaskStatus('idle')
               setMessages(prev => {
                 const newMessages = [...prev]
                 const lastMsg = newMessages[newMessages.length - 1]
@@ -362,6 +369,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
               })
             } else if (message.type === 'task_error') {
               setIsChatLoading(false)
+              setTaskStatus('idle')
               setMessages(prev => [...prev, {
                 role: "assistant",
                 content: `Error: ${message.error}`,
@@ -682,33 +690,45 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
     document.body.removeChild(a);
   };
 
+  const handlePause = () => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "pause" }))
+    }
+  }
+
+  const handleResume = () => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "resume" }))
+    }
+  }
+
   const handleSendMessage = async (content: string, _config?: any) => {
     // Construct UI message with files if present
     let uiContent: React.ReactNode = content
     if (files.length > 0) {
-       // Create object URLs for local preview
-       const fileInfos = files.map(f => ({
-         name: f.name,
-         size: f.size,
-         type: f.type,
-         path: URL.createObjectURL(f)
-       }));
+      // Create object URLs for local preview
+      const fileInfos = files.map(f => ({
+        name: f.name,
+        size: f.size,
+        type: f.type,
+        path: URL.createObjectURL(f)
+      }));
 
-       uiContent = (
-         <div className="space-y-2">
-           <div>{content}</div>
-           <FileAttachment
-             files={fileInfos}
-             variant="user-message"
-             onPreview={(file) => {
-               if (file.path) {
-                 handlePreviewFile(file.path, file.name, file.type);
-               }
-             }}
-           />
-         </div>
-       )
-     }
+      uiContent = (
+        <div className="space-y-2">
+          <div>{content}</div>
+          <FileAttachment
+            files={fileInfos}
+            variant="user-message"
+            onPreview={(file) => {
+              if (file.path) {
+                handlePreviewFile(file.path, file.name, file.type);
+              }
+            }}
+          />
+        </div>
+      )
+    }
 
     setMessages(prev => [...prev, { role: "user", content: uiContent, timestamp: Date.now() }])
     setIsChatLoading(true)
@@ -1186,11 +1206,10 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
           <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
-              className={`px-3 py-2 text-sm border rounded-md transition-colors ${
-                executionMode === "react"
-                  ? "bg-primary text-primary-foreground border-primary"
-                  : "bg-background hover:bg-accent"
-              }`}
+              className={`px-3 py-2 text-sm border rounded-md transition-colors ${executionMode === "react"
+                ? "bg-primary text-primary-foreground border-primary"
+                : "bg-background hover:bg-accent"
+                }`}
               onClick={() => setExecutionMode("react")}
             >
               <div className="font-medium">{t("builds.configForm.executionMode.react.title")}</div>
@@ -1198,11 +1217,10 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
             </button>
             <button
               type="button"
-              className={`px-3 py-2 text-sm border rounded-md transition-colors ${
-                executionMode === "graph"
-                  ? "bg-primary text-primary-foreground border-primary"
-                  : "bg-background hover:bg-accent"
-              }`}
+              className={`px-3 py-2 text-sm border rounded-md transition-colors ${executionMode === "graph"
+                ? "bg-primary text-primary-foreground border-primary"
+                : "bg-background hover:bg-accent"
+                }`}
               onClick={() => setExecutionMode("graph")}
             >
               <div className="font-medium">{t("builds.configForm.executionMode.graph.title")}</div>
@@ -1528,15 +1546,33 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
       <div className="h-14 border-b flex items-center px-4 gap-2 bg-card/30">
         <MessageSquare className="h-5 w-5 text-muted-foreground" />
         <span className="font-medium">{t("builds.preview.title")}</span>
-        <div className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1 transition-all duration-300 ${
-          configSynced
-            ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-            : "bg-muted text-muted-foreground"
-        }`}>
+        <div className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1 transition-all duration-300 ${configSynced
+          ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+          : "bg-muted text-muted-foreground"
+          }`}>
           {configSynced ? <Check className="h-3 w-3" /> : <Zap className="h-3 w-3" />}
           <span>{configSynced ? t("builds.preview.synced") : t("builds.preview.live")}</span>
         </div>
         <div className="ml-auto flex items-center gap-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-muted-foreground hover:text-foreground"
+            disabled={isChatLoading}
+            onClick={() => {
+              setMessages([{
+                role: "assistant",
+                content: t("builds.preview.initialMessage"),
+                timestamp: Date.now()
+              }])
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: "clear_context" }))
+              }
+            }}
+            title={t("common.clear") || "Clear"}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
           <div
             className={`w-2.5 h-2.5 rounded-full ${wsConnected ? 'bg-green-500' : 'bg-red-500'}`}
             title={wsConnected ? t("builds.preview.status.connected") : t("builds.preview.status.disconnected")}
@@ -1559,6 +1595,7 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
                 traceEvents={msg.traceEvents}
                 showProcessView={true}
                 timestamp={msg.timestamp}
+                taskStatus={index === messages.length - 1 && msg.role === 'assistant' ? taskStatus : undefined}
               />
             ))}
             <div ref={messagesEndRef} />
@@ -1575,6 +1612,9 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
             hideConfig={true}
             files={files}
             onFilesChange={setFiles}
+            taskStatus={taskStatus as any}
+            onPause={handlePause}
+            onResume={handleResume}
           />
         </div>
       </div>
@@ -1608,8 +1648,8 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
                 ? t("builds.editor.header.updating")
                 : t("builds.editor.header.creating")
               : isEditMode
-              ? t("builds.editor.header.update")
-              : t("builds.editor.header.create")}
+                ? t("builds.editor.header.update")
+                : t("builds.editor.header.create")}
           </Button>
 
           {isEditMode && (
@@ -1665,31 +1705,31 @@ export function AgentBuilder({ agentId }: AgentBuilderProps) {
             </div>
           </div>
           <div className="flex-1 overflow-hidden flex flex-col min-h-0 bg-muted/30 p-4">
-             {previewState.fileUrl && (
-               <div className="w-full h-full flex items-center justify-center bg-background rounded-lg border overflow-auto">
-                 {previewState.fileType?.startsWith('image/') ? (
-                   <img
-                     src={previewState.fileUrl}
-                     alt={previewState.fileName}
-                     className="max-w-full max-h-full object-contain"
-                   />
-                 ) : (previewState.fileType?.includes('pdf') || previewState.fileName?.endsWith('.pdf')) ? (
-                   <iframe
-                     src={previewState.fileUrl}
-                     className="w-full h-full border-0"
-                     title={previewState.fileName}
-                   />
-                 ) : (
-                   <div className="text-center p-8">
-                     <p className="text-muted-foreground mb-4">{t("files.previewDialog.noPreview") || "No preview available for this file type."}</p>
-                     <Button onClick={handleDownloadFile} variant="outline">
-                       <Download className="mr-2 h-4 w-4" />
-                       {t("files.previewDialog.buttons.download")}
-                     </Button>
-                   </div>
-                 )}
-               </div>
-             )}
+            {previewState.fileUrl && (
+              <div className="w-full h-full flex items-center justify-center bg-background rounded-lg border overflow-auto">
+                {previewState.fileType?.startsWith('image/') ? (
+                  <img
+                    src={previewState.fileUrl}
+                    alt={previewState.fileName}
+                    className="max-w-full max-h-full object-contain"
+                  />
+                ) : (previewState.fileType?.includes('pdf') || previewState.fileName?.endsWith('.pdf')) ? (
+                  <iframe
+                    src={previewState.fileUrl}
+                    className="w-full h-full border-0"
+                    title={previewState.fileName}
+                  />
+                ) : (
+                  <div className="text-center p-8">
+                    <p className="text-muted-foreground mb-4">{t("files.previewDialog.noPreview") || "No preview available for this file type."}</p>
+                    <Button onClick={handleDownloadFile} variant="outline">
+                      <Download className="mr-2 h-4 w-4" />
+                      {t("files.previewDialog.buttons.download")}
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </SheetContent>
       </Sheet>

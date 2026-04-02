@@ -2368,7 +2368,86 @@ async def websocket_build_preview_endpoint(
             message_type = message_data.get("type")
 
             if message_type == "preview":
-                await handle_build_preview_execution(websocket, message_data, user)
+                # Cancel existing task if running
+                if (
+                    hasattr(websocket.state, "preview_task")
+                    and websocket.state.preview_task
+                    and not websocket.state.preview_task.done()
+                ):
+                    websocket.state.preview_task.cancel()
+
+                # Run execution in background task to not block message receiving
+                websocket.state.preview_task = asyncio.create_task(
+                    handle_build_preview_execution(websocket, message_data, user)
+                )
+            elif message_type == "pause":
+                if (
+                    hasattr(websocket.state, "preview_agent_service")
+                    and websocket.state.preview_agent_service
+                ):
+                    if hasattr(
+                        websocket.state.preview_agent_service, "pause_execution"
+                    ):
+                        await websocket.state.preview_agent_service.pause_execution()
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "type": "task_paused",
+                                    "timestamp": datetime.now(timezone.utc).timestamp(),
+                                }
+                            )
+                        )
+                        logger.info(f"Paused build preview for user {user.id}")
+                else:
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "message": "No active agent to pause",
+                            }
+                        )
+                    )
+            elif message_type == "resume":
+                if (
+                    hasattr(websocket.state, "preview_agent_service")
+                    and websocket.state.preview_agent_service
+                ):
+                    if hasattr(
+                        websocket.state.preview_agent_service, "resume_execution"
+                    ):
+                        await websocket.state.preview_agent_service.resume_execution()
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "type": "task_resumed",
+                                    "timestamp": datetime.now(timezone.utc).timestamp(),
+                                }
+                            )
+                        )
+                        logger.info(f"Resumed build preview for user {user.id}")
+                else:
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "message": "No active agent to resume",
+                            }
+                        )
+                    )
+            elif message_type == "clear_context":
+                if hasattr(websocket.state, "preview_memory"):
+                    websocket.state.preview_memory.clear()
+                if hasattr(websocket.state, "preview_history"):
+                    websocket.state.preview_history = []
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "context_cleared",
+                            "timestamp": datetime.now(timezone.utc).timestamp(),
+                        }
+                    )
+                )
+                logger.info(f"Cleared build preview context for user {user.id}")
             else:
                 await websocket.send_text(
                     json.dumps(
@@ -2646,7 +2725,13 @@ async def handle_build_preview_execution(
         allowed_external_dirs.extend([str(d) for d in ALLOWED_EXTERNAL_UPLOAD_DIRS])
 
         # Create agent service (using WebSocket tracer)
-        memory = InMemoryMemoryStore()
+        if not hasattr(websocket.state, "preview_memory"):
+            websocket.state.preview_memory = InMemoryMemoryStore()
+        memory = websocket.state.preview_memory
+
+        if not hasattr(websocket.state, "preview_history"):
+            websocket.state.preview_history = []
+
         agent_service = AgentService(
             name="build_preview_agent",
             llm=default_llm,
@@ -2663,6 +2748,9 @@ async def handle_build_preview_execution(
             task_id=preview_task_id,
             tracer=preview_tracer,
         )
+
+        # Save agent service to websocket state for pause functionality
+        websocket.state.preview_agent_service = agent_service
 
         # Send preview start event
         await websocket.send_text(
@@ -2805,12 +2893,25 @@ async def handle_build_preview_execution(
         if file_info_list:
             execution_context["file_info"] = file_info_list
 
+        # Load preserved history from the connection state
+        if websocket.state.preview_history:
+            agent_service.set_conversation_history(websocket.state.preview_history)
+
         with UserContext(int(user.id)):
             result = await agent_service.execute_task(
                 task=user_message,
                 context=execution_context if execution_context else None,
                 task_id=preview_task_id,
             )
+
+        # Append the new interaction to the history
+        websocket.state.preview_history.append(
+            {"role": "user", "content": user_message}
+        )
+        assistant_output = result.get("output", "")
+        websocket.state.preview_history.append(
+            {"role": "assistant", "content": assistant_output}
+        )
 
         # Send preview completion event
         await websocket.send_text(
