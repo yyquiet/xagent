@@ -253,6 +253,9 @@ class RegisterDocumentRequest(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     collection: str = Field(..., description="Collection name for data isolation")
+    file_id: Optional[str] = Field(
+        None, description="UploadedFile file_id for stable file association"
+    )
     source_path: str = Field(..., description="Absolute path to uploaded file")
 
     file_type: Optional[str] = Field(
@@ -1327,6 +1330,12 @@ class CollectionInfo(BaseModel):
             data["extra_metadata"] = json.loads(data["extra_metadata"])
         if isinstance(data.get("document_names"), str):
             data["document_names"] = json.loads(data["document_names"])
+        if isinstance(data.get("ingestion_config"), str):
+            raw_ingestion_config = data["ingestion_config"].strip()
+            if raw_ingestion_config:
+                data["ingestion_config"] = json.loads(raw_ingestion_config)
+            else:
+                data["ingestion_config"] = None
 
         # 2. Convert NaN values to None (LanceDB stores NULL as NaN for numeric fields)
         for key, value in data.items():
