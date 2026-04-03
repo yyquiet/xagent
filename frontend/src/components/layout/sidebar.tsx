@@ -654,6 +654,13 @@ export function Sidebar({ className }: SidebarProps) {
     return expandedMenus.includes(menuName)
   }
 
+  const isPathActive = (href: string) => {
+    if (href === "/") {
+      return pathname === "/"
+    }
+    return pathname === href || pathname.startsWith(`${href}/`)
+  }
+
   if (isAgentPage && !shouldShowSidebar) {
     return (
       <div className="flex items-center justify-center w-12 bg-card border-r border-border">
@@ -710,8 +717,7 @@ export function Sidebar({ className }: SidebarProps) {
               </div>
               <div className="space-y-1">
                 {group.items.map((item) => {
-                  const isActive = pathname === item.href ||
-                    (item.href !== "/" && pathname.startsWith(item.href))
+                  const isActive = isPathActive(item.href)
                   const hasChildren = item.children && item.children.length > 0
                   const isExpanded = isMenuExpanded(item.href)
 
