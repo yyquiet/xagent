@@ -8,14 +8,23 @@ import json
 import logging
 from typing import Optional
 
-from ..sandbox import BoxliteStore, SandboxConfig, SandboxInfo, SandboxTemplate
+from ..sandbox import (
+    BoxliteStore,
+    DockerStore,
+    SandboxConfig,
+    SandboxInfo,
+    SandboxSnapshot,
+    SandboxTemplate,
+)
 from .models.database import get_db
 from .models.sandbox import SandboxInfo as SandboxInfoModel
+from .models.sandbox import SandboxSnapshot as SandboxSnapshotModel
 
 logger = logging.getLogger(__name__)
 
 # Sandbox type constant
 SANDBOX_TYPE_BOXLITE = "boxlite"
+SANDBOX_TYPE_DOCKER = "docker"
 
 
 class DBBoxliteStore(BoxliteStore):
@@ -170,3 +179,238 @@ class DBBoxliteStore(BoxliteStore):
         # Convert Pydantic model to dict, then to JSON
         model.template = json.dumps(info.template.model_dump())  # type: ignore[assignment]
         model.config = json.dumps(info.config.model_dump())  # type: ignore[assignment]
+
+
+class DBDockerStore(DockerStore):
+    """Database-backed implementation of DockerStore."""
+
+    def __init__(self) -> None:
+        """Initialize Docker sandbox store."""
+
+    def _get_db_session(self):  # type: ignore[no-untyped-def]
+        """Get database session. Can be mocked in tests."""
+        return next(get_db())
+
+    def get_info(self, name: str) -> Optional[SandboxInfo]:
+        """Get Docker sandbox info from database."""
+        db = self._get_db_session()
+        try:
+            model = (
+                db.query(SandboxInfoModel)
+                .filter(
+                    SandboxInfoModel.sandbox_type == SANDBOX_TYPE_DOCKER,
+                    SandboxInfoModel.name == name,
+                )
+                .first()
+            )
+            if not model:
+                return None
+            return self._model_to_info(model)
+        except Exception as e:
+            logger.error(f"Failed to get docker sandbox info for {name}: {e}")
+            raise
+        finally:
+            db.close()
+
+    def add_info(self, name: str, info: SandboxInfo) -> None:
+        """Add or update Docker sandbox info in database."""
+        db = self._get_db_session()
+        try:
+            existing = (
+                db.query(SandboxInfoModel)
+                .filter(
+                    SandboxInfoModel.sandbox_type == SANDBOX_TYPE_DOCKER,
+                    SandboxInfoModel.name == name,
+                )
+                .first()
+            )
+            if existing:
+                self._update_info_model(existing, info)
+            else:
+                db.add(self._info_to_model(info))
+            db.commit()
+        except Exception as e:
+            logger.error(f"Failed to add docker sandbox info for {name}: {e}")
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def update_info_state(self, name: str, state: str) -> None:
+        """Update Docker sandbox state in database."""
+        db = self._get_db_session()
+        try:
+            model = (
+                db.query(SandboxInfoModel)
+                .filter(
+                    SandboxInfoModel.sandbox_type == SANDBOX_TYPE_DOCKER,
+                    SandboxInfoModel.name == name,
+                )
+                .first()
+            )
+            if model:
+                model.state = state
+                db.commit()
+        except Exception as e:
+            logger.error(f"Failed to update docker sandbox state for {name}: {e}")
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def delete_info(self, name: str) -> None:
+        """Delete Docker sandbox info from database."""
+        db = self._get_db_session()
+        try:
+            db.query(SandboxInfoModel).filter(
+                SandboxInfoModel.sandbox_type == SANDBOX_TYPE_DOCKER,
+                SandboxInfoModel.name == name,
+            ).delete()
+            db.commit()
+        except Exception as e:
+            logger.error(f"Failed to delete docker sandbox info for {name}: {e}")
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def get_snapshot(self, snapshot_id: str) -> Optional[SandboxSnapshot]:
+        """Get Docker snapshot info from database."""
+        db = self._get_db_session()
+        try:
+            model = (
+                db.query(SandboxSnapshotModel)
+                .filter(
+                    SandboxSnapshotModel.sandbox_type == SANDBOX_TYPE_DOCKER,
+                    SandboxSnapshotModel.snapshot_id == snapshot_id,
+                )
+                .first()
+            )
+            if not model:
+                return None
+            return self._snapshot_model_to_snapshot(model)
+        except Exception as e:
+            logger.error(f"Failed to get docker snapshot info for {snapshot_id}: {e}")
+            raise
+        finally:
+            db.close()
+
+    def add_snapshot(self, snapshot: SandboxSnapshot) -> None:
+        """Add or update Docker snapshot info in database."""
+        db = self._get_db_session()
+        try:
+            existing = (
+                db.query(SandboxSnapshotModel)
+                .filter(
+                    SandboxSnapshotModel.sandbox_type == SANDBOX_TYPE_DOCKER,
+                    SandboxSnapshotModel.snapshot_id == snapshot.snapshot_id,
+                )
+                .first()
+            )
+            if existing:
+                self._update_snapshot_model(existing, snapshot)
+            else:
+                db.add(self._snapshot_to_model(snapshot))
+            db.commit()
+        except Exception as e:
+            logger.error(
+                f"Failed to add docker snapshot info for {snapshot.snapshot_id}: {e}"
+            )
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def list_snapshots(self) -> list[SandboxSnapshot]:
+        """List persisted Docker snapshots."""
+        db = self._get_db_session()
+        try:
+            models = (
+                db.query(SandboxSnapshotModel)
+                .filter(SandboxSnapshotModel.sandbox_type == SANDBOX_TYPE_DOCKER)
+                .order_by(SandboxSnapshotModel.snapshot_id.asc())
+                .all()
+            )
+            return [self._snapshot_model_to_snapshot(model) for model in models]
+        except Exception as e:
+            logger.error(f"Failed to list docker snapshots: {e}")
+            raise
+        finally:
+            db.close()
+
+    def delete_snapshot(self, snapshot_id: str) -> None:
+        """Delete Docker snapshot info from database."""
+        db = self._get_db_session()
+        try:
+            db.query(SandboxSnapshotModel).filter(
+                SandboxSnapshotModel.sandbox_type == SANDBOX_TYPE_DOCKER,
+                SandboxSnapshotModel.snapshot_id == snapshot_id,
+            ).delete()
+            db.commit()
+        except Exception as e:
+            logger.error(
+                f"Failed to delete docker snapshot info for {snapshot_id}: {e}"
+            )
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def _model_to_info(self, model: SandboxInfoModel) -> SandboxInfo:
+        """Convert database model to SandboxInfo."""
+        template_str = str(model.template) if model.template is not None else "{}"
+        config_str = str(model.config) if model.config is not None else "{}"
+        return SandboxInfo(
+            name=str(model.name),
+            state=str(model.state),
+            template=SandboxTemplate(**json.loads(template_str)),
+            config=SandboxConfig(**json.loads(config_str)),
+            created_at=model.created_at.isoformat()
+            if model.created_at is not None
+            else None,
+        )
+
+    def _info_to_model(self, info: SandboxInfo) -> SandboxInfoModel:
+        """Convert SandboxInfo to database model."""
+        return SandboxInfoModel(
+            sandbox_type=SANDBOX_TYPE_DOCKER,
+            name=info.name,
+            state=info.state,
+            template=json.dumps(info.template.model_dump()),
+            config=json.dumps(info.config.model_dump()),
+        )
+
+    def _update_info_model(self, model: SandboxInfoModel, info: SandboxInfo) -> None:
+        """Update database model from SandboxInfo."""
+        model.state = info.state  # type: ignore[assignment]
+        model.template = json.dumps(info.template.model_dump())  # type: ignore[assignment]
+        model.config = json.dumps(info.config.model_dump())  # type: ignore[assignment]
+
+    def _snapshot_model_to_snapshot(
+        self, model: SandboxSnapshotModel
+    ) -> SandboxSnapshot:
+        """Convert database model to SandboxSnapshot."""
+        metadata_str = (
+            str(model.metadata_json) if model.metadata_json is not None else "{}"
+        )
+        return SandboxSnapshot(
+            snapshot_id=str(model.snapshot_id),
+            metadata=json.loads(metadata_str),
+            created_at=str(model.created_at) if model.created_at is not None else None,
+        )
+
+    def _snapshot_to_model(self, snapshot: SandboxSnapshot) -> SandboxSnapshotModel:
+        """Convert SandboxSnapshot to database model."""
+        return SandboxSnapshotModel(
+            sandbox_type=SANDBOX_TYPE_DOCKER,
+            snapshot_id=snapshot.snapshot_id,
+            metadata_json=json.dumps(snapshot.metadata),
+            created_at=snapshot.created_at,
+        )
+
+    def _update_snapshot_model(
+        self, model: SandboxSnapshotModel, snapshot: SandboxSnapshot
+    ) -> None:
+        """Update snapshot database model from SandboxSnapshot."""
+        model.metadata_json = json.dumps(snapshot.metadata)  # type: ignore[assignment]
+        model.created_at = snapshot.created_at  # type: ignore[assignment]

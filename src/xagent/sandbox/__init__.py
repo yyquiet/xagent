@@ -9,6 +9,7 @@ from .base import (
     Sandbox,
     SandboxConfig,
     SandboxInfo,
+    SandboxNotFoundError,
     SandboxService,
     SandboxSnapshot,
     SandboxTemplate,
@@ -26,6 +27,7 @@ __all__ = [
     "SandboxTemplate",
     "SandboxConfig",
     "SandboxInfo",
+    "SandboxNotFoundError",
     "SandboxSnapshot",
     "ExecResult",
     "Sandbox",
@@ -45,6 +47,25 @@ try:
         "BoxliteStore",
         "MemBoxliteStore",
         "BoxliteSandboxService",
+    ]
+except ImportError:
+    pass
+
+try:
+    from .docker_sandbox import (
+        DockerSandbox,
+        DockerSandboxService,
+        DockerStore,
+        MemDockerStore,
+        is_docker_available,
+    )
+
+    __all__ += [
+        "DockerSandbox",
+        "DockerStore",
+        "MemDockerStore",
+        "DockerSandboxService",
+        "is_docker_available",
     ]
 except ImportError:
     pass
