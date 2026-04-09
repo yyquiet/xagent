@@ -26,6 +26,7 @@ const en = {
     noOptions: "No options available",
     rename: "Rename",
     clear: "Clear",
+    or: "Or",
     errors: {
       unknown: "Unknown error",
     },
@@ -1783,6 +1784,16 @@ Build when you need.`
         edit: "Edit",
         deleteConfirm: "Are you sure you want to delete this agent?",
       },
+      createModal: {
+        title: "How would you like to create an agent?",
+        describeTitle: "By Describing It",
+        describeDesc: "Tell us what you want — {appName} will pre-fill the configuration for you",
+        placeholder: "e.g. A customer support agent that answers product questions, handles refund requests, and escalates complex issues to human agents...",
+        buildBtn: "Build Agent",
+        manualTitle: "Manually",
+        manualDesc: "Open a blank form and configure each field yourself from scratch",
+        manualBtn: "Go to Builder",
+      },
       chat: {
         welcome: "Hello! I'm {name}. {description}\n\nYou can start a conversation directly, or select a suggested prompt below.",
         inputPlaceholder: "Type your message...",
@@ -1945,13 +1956,22 @@ Build when you need.`
       },
       suggestedPrompts: {
         label: "Suggested Prompts",
-        description: "Provide example prompts that users can click to use directly",
+        description: "Provide some example prompts for users to click and use directly",
         placeholder: "Example prompt {index}",
         add: "+ Add Prompt",
         delete: "Delete",
       },
+      chat: {
+        title: "{appName} Assistant",
+        subtitle: "Chat to configure your agent",
+        initialMessage: "Hello! I am your {appName} Assistant. Describe what kind of agent you want to create, and I'll help you configure it.",
+        defaultReply: "I have updated the configuration based on your request.",
+        errorCommunicate: "Failed to communicate with {appName} Assistant.",
+        errorConnection: "Connection error. Please try again.",
+        errorInit: "Failed to initialize connection.",
+      },
       actions: {
-        save: "Save Configuration",
+        save: "Save Config",
         reset: "Reset",
       }
     },
@@ -2337,6 +2357,7 @@ Build when you need.`
           unknown: "Unknown Operation",
         },
         actions: {
+          dag_execution: "DAG Execution Start",
           dag_step_start: "Step Start",
           dag_step_end: "Step Completed",
           dag_step_failed: "Step Failed",
@@ -2349,6 +2370,7 @@ Build when you need.`
           tool_execution_end: "Tool Call Completed",
           tool_execution_failed: "Tool Call Failed",
           tool_using: "Use Tool",
+          ai_message: "AI Message",
           trace_error: "Step Error Log",
           react_task_start: "ReAct Task Start",
           react_task_end: "ReAct Task Completed",

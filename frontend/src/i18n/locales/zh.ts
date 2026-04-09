@@ -26,6 +26,7 @@ const zh = {
     noOptions: "暂无选项",
     rename: "重命名",
     clear: "清除",
+    or: "或",
     errors: {
       unknown: "未知错误",
     },
@@ -1783,6 +1784,16 @@ Build when you need.`
         edit: "编辑",
         deleteConfirm: "确定要删除这个 Agent 吗？",
       },
+      createModal: {
+        title: "你想如何创建 Agent？",
+        describeTitle: "通过描述创建",
+        describeDesc: "告诉我们你的需求 —— {appName} 将为你预填配置",
+        placeholder: "例如：一个可以回答产品问题、处理退款请求并将复杂问题升级给人工客服的客服 Agent...",
+        buildBtn: "生成 Agent",
+        manualTitle: "手动创建",
+        manualDesc: "打开空白表单，从头开始配置每个字段",
+        manualBtn: "前往创建面板",
+      },
       chat: {
         welcome: "你好！我是 {name}。{description}\n\n你可以直接开始对话，或者选择下方的建议提示词。",
         inputPlaceholder: "输入你的消息...",
@@ -1949,6 +1960,15 @@ Build when you need.`
         placeholder: "示例提示词 {index}",
         add: "+ 添加提示词",
         delete: "删除",
+      },
+      chat: {
+        title: "{appName} 助手",
+        subtitle: "通过对话配置你的 Agent",
+        initialMessage: "你好！我是 {appName} 助手。请描述你想创建什么样的 Agent，我会帮你进行配置。",
+        defaultReply: "我已经根据你的要求更新了配置。",
+        errorCommunicate: "与 {appName} 助手通信失败。",
+        errorConnection: "连接错误，请重试。",
+        errorInit: "初始化连接失败。",
       },
       actions: {
         save: "保存配置",
@@ -2337,6 +2357,7 @@ Build when you need.`
           unknown: "未知操作",
         },
         actions: {
+          dag_execution: "DAG 执行开始",
           dag_step_start: "步骤开始",
           dag_step_end: "步骤完成",
           dag_step_failed: "步骤失败",
@@ -2349,6 +2370,7 @@ Build when you need.`
           tool_execution_end: "工具调用完成",
           tool_execution_failed: "工具调用失败",
           tool_using: "使用工具",
+          ai_message: "AI 消息",
           trace_error: "步骤错误（日志记录）",
           react_task_start: "ReAct模式任务开始",
           react_task_end: "ReAct模式任务完成",
