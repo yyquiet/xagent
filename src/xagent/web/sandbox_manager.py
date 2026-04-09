@@ -349,9 +349,9 @@ def _create_sandbox_service() -> Optional[SandboxService]:
 
     Environment variables:
     - SANDBOX_ENABLED: Enable/disable sandbox (default: true)
-    - SANDBOX_IMPLEMENTATION: Implementation type (default: boxlite)
-      - boxlite: Use Boxlite sandbox
+    - SANDBOX_IMPLEMENTATION: Implementation type (default: docker)
       - docker: Use Docker sandbox
+      - boxlite: Use Boxlite sandbox
     - BOXLITE_HOME_DIR: Boxlite home directory (optional)
 
     Returns:
@@ -364,7 +364,7 @@ def _create_sandbox_service() -> Optional[SandboxService]:
         return None
 
     # Get implementation type
-    implementation = os.getenv("SANDBOX_IMPLEMENTATION", "boxlite")
+    implementation = os.getenv("SANDBOX_IMPLEMENTATION", "docker")
 
     if implementation == "boxlite":
         return _create_boxlite_service()
@@ -372,9 +372,9 @@ def _create_sandbox_service() -> Optional[SandboxService]:
         return _create_docker_service()
     else:
         logger.warning(
-            f"Unknown sandbox implementation: {implementation}, falling back to boxlite"
+            f"Unknown sandbox implementation: {implementation}, falling back to docker"
         )
-        return _create_boxlite_service()
+        return _create_docker_service()
 
 
 def _create_boxlite_service() -> Optional[SandboxService]:

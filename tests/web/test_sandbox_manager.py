@@ -36,11 +36,11 @@ class TestCreateSandboxService:
             result = _create_sandbox_service()
         assert result is None
 
-    def test_boxlite_default(self):
-        """Test default implementation is boxlite."""
+    def test_docker_default(self):
+        """Test default implementation is docker."""
         with (
             patch.dict("os.environ", {"SANDBOX_ENABLED": "true"}, clear=False),
-            patch("xagent.web.sandbox_manager._create_boxlite_service") as mock_create,
+            patch("xagent.web.sandbox_manager._create_docker_service") as mock_create,
         ):
             os.environ.pop("SANDBOX_IMPLEMENTATION", None)
             mock_create.return_value = MagicMock()
@@ -48,15 +48,15 @@ class TestCreateSandboxService:
         assert result is not None
         mock_create.assert_called_once()
 
-    def test_unknown_implementation_falls_back_to_boxlite(self):
-        """Test unknown implementation falls back to boxlite."""
+    def test_unknown_implementation_falls_back_to_docker(self):
+        """Test unknown implementation falls back to docker."""
         with (
             patch.dict(
                 "os.environ",
                 {"SANDBOX_ENABLED": "true", "SANDBOX_IMPLEMENTATION": "unknown"},
                 clear=False,
             ),
-            patch("xagent.web.sandbox_manager._create_boxlite_service") as mock_create,
+            patch("xagent.web.sandbox_manager._create_docker_service") as mock_create,
         ):
             mock_create.return_value = MagicMock()
             _create_sandbox_service()
