@@ -9,9 +9,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
-from ......providers.vector_store.lancedb import get_connection_from_env
 from ..core.exceptions import DatabaseOperationError, VersionManagementError
 from ..core.schemas import StepType
+from ..storage.factory import get_vector_store_raw_connection
 from ..utils.lancedb_query_utils import query_to_list
 from ..utils.string_utils import build_lancedb_filter_expression
 
@@ -344,7 +344,7 @@ def list_candidates(
     resolved_step_type = _resolve_step_type(step_type)
     try:
         # Get LanceDB connection from environment (uses default path if LANCEDB_DIR not set)
-        connection = get_connection_from_env()
+        connection = get_vector_store_raw_connection()
 
         # Get candidates based on step_type
         candidates = _get_candidates(

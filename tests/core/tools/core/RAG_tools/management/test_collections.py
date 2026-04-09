@@ -34,7 +34,7 @@ from src.xagent.core.tools.core.RAG_tools.management import (
     retry_document,
 )
 from src.xagent.core.tools.core.RAG_tools.management.status import load_ingestion_status
-from src.xagent.providers.vector_store.lancedb import get_connection_from_env
+from src.xagent.core.tools.core.RAG_tools.storage import get_vector_index_store
 
 
 @pytest.fixture()
@@ -43,6 +43,9 @@ def temp_lancedb_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
 
     original = os.environ.get("LANCEDB_DIR")
     monkeypatch.setenv("LANCEDB_DIR", str(tmp_path))
+    from src.xagent.core.tools.core.RAG_tools.storage.factory import StorageFactory
+
+    StorageFactory.get_factory().reset_all()
     yield str(tmp_path)
     if original is None:
         monkeypatch.delenv("LANCEDB_DIR", raising=False)
@@ -51,7 +54,7 @@ def temp_lancedb_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
 
 
 def _insert_documents(records: List[Dict[str, object]]) -> None:
-    conn = get_connection_from_env()
+    conn = get_vector_index_store().get_raw_connection()
     ensure_documents_table(conn)
     table = conn.open_table("documents")
 
@@ -76,7 +79,7 @@ def _insert_documents(records: List[Dict[str, object]]) -> None:
 
 
 def _insert_parses(records: List[Dict[str, object]]) -> None:
-    conn = get_connection_from_env()
+    conn = get_vector_index_store().get_raw_connection()
     ensure_parses_table(conn)
     table = conn.open_table("parses")
     table.add(records)
@@ -94,14 +97,14 @@ def _insert_parses(records: List[Dict[str, object]]) -> None:
 
 
 def _insert_chunks(records: List[Dict[str, object]]) -> None:
-    conn = get_connection_from_env()
+    conn = get_vector_index_store().get_raw_connection()
     ensure_chunks_table(conn)
     table = conn.open_table("chunks")
     table.add(records)
 
 
 def _insert_embeddings(model_name: str, records: List[Dict[str, object]]) -> None:
-    conn = get_connection_from_env()
+    conn = get_vector_index_store().get_raw_connection()
     ensure_embeddings_table(conn, to_model_tag(model_name), vector_dim=3)
     table = conn.open_table(embeddings_table_name(model_name))
     table.add(records)
@@ -118,10 +121,11 @@ def _insert_embeddings(model_name: str, records: List[Dict[str, object]]) -> Non
         )
 
 
-def test_list_collections_empty(temp_lancedb_dir: str) -> None:
+@pytest.mark.asyncio
+async def test_list_collections_empty(temp_lancedb_dir: str) -> None:
     """When no data exists the result should be empty but successful."""
 
-    result = list_collections(user_id=None, is_admin=True)
+    result = await list_collections(user_id=None, is_admin=True)
 
     assert result.status == "success"
     assert result.total_count == 0
@@ -129,7 +133,8 @@ def test_list_collections_empty(temp_lancedb_dir: str) -> None:
     assert result.warnings == []
 
 
-def test_list_collections_with_data(temp_lancedb_dir: str) -> None:
+@pytest.mark.asyncio
+async def test_list_collections_with_data(temp_lancedb_dir: str) -> None:
     """Aggregate statistics should include counts per collection and document names."""
 
     collection = "demo_collection"
@@ -193,7 +198,7 @@ def test_list_collections_with_data(temp_lancedb_dir: str) -> None:
         ],
     )
 
-    result = list_collections(user_id=None, is_admin=True)
+    result = await list_collections(user_id=None, is_admin=True)
 
     assert result.status == "success"
     assert result.total_count == 1
@@ -206,6 +211,51 @@ def test_list_collections_with_data(temp_lancedb_dir: str) -> None:
     # document_names now contains source_path values
     assert sorted(collection_info.document_names) == sorted(["other.pdf", "sample.pdf"])
     assert result.warnings == []
+
+
+@pytest.mark.asyncio
+async def test_list_collections_admin_includes_config_from_other_user(
+    temp_lancedb_dir: str,
+) -> None:
+    """Admin listing should attach ingestion_config stored under a tenant user_id."""
+
+    import json
+
+    from src.xagent.core.tools.core.RAG_tools.storage.factory import (
+        get_metadata_store,
+    )
+
+    collection = "cfg_tenant_collection"
+    doc_id = "doc-cfg"
+    now = datetime.utcnow()
+
+    _insert_documents(
+        [
+            {
+                "collection": collection,
+                "doc_id": doc_id,
+                "source_path": "/path/x.pdf",
+                "file_type": "pdf",
+                "content_hash": "h1",
+                "uploaded_at": now,
+                "title": "T",
+                "language": "zh",
+            }
+        ]
+    )
+
+    await get_metadata_store().save_collection_config(
+        collection,
+        json.dumps({}),
+        user_id=99,
+    )
+
+    result = await list_collections(user_id=None, is_admin=True)
+
+    assert result.status == "success"
+    assert result.total_count == 1
+    info = next(c for c in result.collections if c.name == collection)
+    assert info.ingestion_config is not None
 
 
 def test_get_document_stats_missing_document(temp_lancedb_dir: str) -> None:

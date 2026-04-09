@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from xagent.core.tools.core.RAG_tools.storage.contracts import DocumentRecord
 from xagent.web.api.auth import hash_password
 from xagent.web.api.kb import kb_router
 from xagent.web.models.database import Base, get_db
@@ -442,17 +443,19 @@ def test_kb_rename_rejects_path_traversal_in_collection_names(test_env, temp_upl
     from urllib.parse import quote
 
     # Mock database operations to avoid schema errors
-    with patch("xagent.web.api.kb.get_connection_from_env") as mock_conn:
+    with patch("xagent.web.api.kb.get_vector_index_store") as mock_store_factory:
         from unittest.mock import MagicMock
 
         # Mock connection and table
+        mock_store = MagicMock()
         mock_db_conn = MagicMock()
         mock_table = MagicMock()
         mock_table.count_rows.return_value = (
             0  # No documents, so permission check passes
         )
         mock_db_conn.open_table.return_value = mock_table
-        mock_conn.return_value = mock_db_conn
+        mock_store.get_raw_connection.return_value = mock_db_conn
+        mock_store_factory.return_value = mock_store
 
         for malicious_name in malicious_names:
             # Test malicious old name (URL encoded)
@@ -499,19 +502,21 @@ def test_kb_rename_physical_directory_rename(test_env, temp_uploads):
         patch(
             "xagent.core.tools.core.RAG_tools.management.collections._list_table_names"
         ) as mock_list_tables,
-        patch("xagent.web.api.kb.get_connection_from_env") as mock_conn,
+        patch("xagent.web.api.kb.get_vector_index_store") as mock_store_factory,
     ):
         from unittest.mock import MagicMock
 
         mock_list_tables.return_value = []
         # Mock connection and table to avoid database errors
+        mock_store = MagicMock()
         mock_db_conn = MagicMock()
         mock_table = MagicMock()
         mock_table.count_rows.return_value = (
             0  # No documents, so permission check passes
         )
         mock_db_conn.open_table.return_value = mock_table
-        mock_conn.return_value = mock_db_conn
+        mock_store.get_raw_connection.return_value = mock_db_conn
+        mock_store_factory.return_value = mock_store
 
         # Attempt rename
         response = client.put(
@@ -549,17 +554,19 @@ def test_kb_rename_physical_rename_failure_aborts_operation(test_env, temp_uploa
     (old_coll_dir / "some_file.txt").write_text("data")
 
     # Mock database operations to avoid schema errors
-    with patch("xagent.web.api.kb.get_connection_from_env") as mock_conn:
+    with patch("xagent.web.api.kb.get_vector_index_store") as mock_store_factory:
         from unittest.mock import MagicMock
 
         # Mock connection and table
+        mock_store = MagicMock()
         mock_db_conn = MagicMock()
         mock_table = MagicMock()
         mock_table.count_rows.return_value = (
             0  # No documents, so permission check passes
         )
         mock_db_conn.open_table.return_value = mock_table
-        mock_conn.return_value = mock_db_conn
+        mock_store.get_raw_connection.return_value = mock_db_conn
+        mock_store_factory.return_value = mock_store
 
         # Physical rename uses shutil.move() to support cross-device moves.
         # Patch it to fail to simulate a filesystem permission error.
@@ -602,17 +609,19 @@ def test_kb_rename_target_directory_exists_conflict(test_env, temp_uploads):
     (new_coll_dir / "new_file.txt").write_text("new data")
 
     # Mock database operations to avoid schema errors
-    with patch("xagent.web.api.kb.get_connection_from_env") as mock_conn:
+    with patch("xagent.web.api.kb.get_vector_index_store") as mock_store_factory:
         from unittest.mock import MagicMock
 
         # Mock connection and table
+        mock_store = MagicMock()
         mock_db_conn = MagicMock()
         mock_table = MagicMock()
         mock_table.count_rows.return_value = (
             0  # No documents, so permission check passes
         )
         mock_db_conn.open_table.return_value = mock_table
-        mock_conn.return_value = mock_db_conn
+        mock_store.get_raw_connection.return_value = mock_db_conn
+        mock_store_factory.return_value = mock_store
 
         # Attempt rename to existing directory
         response = client.put(
@@ -762,20 +771,20 @@ def test_check_documents_exist_prefers_uploaded_file_filename(test_env, temp_upl
         session.close()
 
     records = [
-        {
-            "collection": "demo",
-            "doc_id": "doc-new",
-            "file_id": file_record.file_id,
-            "source_path": "/legacy/wrong_name.txt",
-        },
-        {
-            "collection": "demo",
-            "doc_id": "doc-old",
-            "source_path": "/legacy/old_name.txt",
-        },
+        DocumentRecord(
+            doc_id="doc-new",
+            file_id=file_record.file_id,
+            source_path="/legacy/wrong_name.txt",
+        ),
+        DocumentRecord(
+            doc_id="doc-old",
+            source_path="/legacy/old_name.txt",
+        ),
     ]
 
-    with patch("xagent.web.api.kb._list_documents_for_user", return_value=records):
+    with patch("xagent.web.api.kb.get_vector_index_store") as mock_get_store:
+        mock_store = mock_get_store.return_value
+        mock_store.list_document_records.return_value = records
         response = client.post(
             "/api/kb/collections/demo/documents/check",
             json={"filenames": ["actual_name.txt", "old_name.txt", "wrong_name.txt"]},
@@ -812,32 +821,28 @@ def test_delete_document_prefers_file_id_and_cleans_orphan_file(test_env, temp_u
         session.close()
 
     document_state = [
-        {
-            "collection": "demo",
-            "doc_id": "doc-1",
-            "file_id": target_file_id,
-            "source_path": str(file_path),
-        }
+        DocumentRecord(
+            doc_id="doc-1",
+            file_id=target_file_id,
+            source_path=str(file_path),
+        )
     ]
 
-    def _fake_list_documents_for_user(*, collection_name=None, **kwargs):
-        if collection_name == "demo":
-            return list(document_state)
+    def _fake_list_documents_for_user(*args, **kwargs):
         return list(document_state)
 
     def _fake_delete_document(collection_name, doc_id, user_id, is_admin):
         document_state.clear()
 
     with (
-        patch(
-            "xagent.web.api.kb._list_documents_for_user",
-            side_effect=_fake_list_documents_for_user,
-        ),
+        patch("xagent.web.api.kb.get_vector_index_store") as mock_get_store,
         patch(
             "xagent.core.tools.core.RAG_tools.management.collections.delete_document",
             side_effect=_fake_delete_document,
         ),
     ):
+        mock_store = mock_get_store.return_value
+        mock_store.list_document_records.side_effect = _fake_list_documents_for_user
         response = client.delete(
             f"/api/kb/collections/demo/documents/ignored.txt?file_id={target_file_id}",
             headers=headers,
@@ -884,37 +889,39 @@ def test_kb_delete_collection_cleans_file_id_managed_root_file(test_env, temp_up
         session.close()
 
     document_state = [
-        {
-            "collection": "demo",
-            "doc_id": "doc-1",
-            "file_id": target_file_id,
-            "source_path": str(file_path),
-        }
+        DocumentRecord(
+            doc_id="doc-1",
+            file_id=target_file_id,
+            source_path=str(file_path),
+        )
     ]
 
-    def _fake_list_documents_for_user(*, collection_name=None, **kwargs):
-        if collection_name == "demo":
-            return list(document_state)
-        return []
+    def _fake_list_documents_for_user(*args, **kwargs):
+        # API calls it twice: once for filename_map, once for remaining_file_ids check
+        # For simplicity, we return the same state (API logic will handle consistency)
+        return list(document_state)
 
     with (
-        patch(
-            "xagent.web.api.kb._list_documents_for_user",
-            side_effect=_fake_list_documents_for_user,
-        ),
+        patch("xagent.web.api.kb.get_vector_index_store") as mock_get_store,
         patch("xagent.web.api.kb.delete_collection") as mock_delete,
     ):
+        mock_store = mock_get_store.return_value
+        mock_store.list_document_records.side_effect = _fake_list_documents_for_user
         from xagent.core.tools.core.RAG_tools.core.schemas import (
             CollectionOperationResult,
         )
 
-        mock_delete.return_value = CollectionOperationResult(
-            status="success",
-            collection="demo",
-            message="deleted",
-            affected_documents=[],
-            deleted_counts={},
-        )
+        def _fake_delete_collection(*args, **kwargs):
+            document_state.clear()
+            return CollectionOperationResult(
+                status="success",
+                collection="demo",
+                message="deleted",
+                affected_documents=[],
+                deleted_counts={},
+            )
+
+        mock_delete.side_effect = _fake_delete_collection
         response = client.delete("/api/kb/collections/demo", headers=headers)
 
     assert response.status_code == 200

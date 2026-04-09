@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from ......providers.vector_store.lancedb import get_connection_from_env
 from ..core.exceptions import CascadeCleanupError
 from ..LanceDB.schema_manager import (
     ensure_chunks_table,
@@ -17,6 +16,7 @@ from ..LanceDB.schema_manager import (
     ensure_main_pointers_table,
     ensure_parses_table,
 )
+from ..storage.factory import get_vector_store_raw_connection
 from ..utils.string_utils import build_lancedb_filter_expression, escape_lancedb_string
 from .main_pointer_manager import get_main_pointer
 
@@ -168,7 +168,7 @@ def cleanup_cascade(
     Returns:
         Deleted (or planned) counts per table scope
     """
-    conn = get_connection_from_env()
+    conn = get_vector_store_raw_connection()
     ensure_documents_table(conn)
     ensure_parses_table(conn)
     ensure_chunks_table(conn)

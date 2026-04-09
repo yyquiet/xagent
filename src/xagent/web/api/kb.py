@@ -24,6 +24,7 @@ from googleapiclient.http import MediaIoBaseDownload  # type: ignore
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from ...core.tools.core.RAG_tools.core.config import DEFAULT_VECTOR_STORE_SCAN_LIMIT
 from ...core.tools.core.RAG_tools.core.schemas import (
     ChunkStrategy,
     CollectionOperationResult,
@@ -53,7 +54,7 @@ from ...core.tools.core.RAG_tools.pipelines.document_ingestion import (
 from ...core.tools.core.RAG_tools.pipelines.document_search import run_document_search
 from ...core.tools.core.RAG_tools.pipelines.web_ingestion import run_web_ingestion
 from ...core.tools.core.RAG_tools.progress import get_progress_manager
-from ...providers.vector_store.lancedb import get_connection_from_env
+from ...core.tools.core.RAG_tools.storage.factory import get_vector_index_store
 from ..auth_dependencies import get_current_user
 from ..config import (
     MAX_FILE_SIZE,
@@ -76,9 +77,6 @@ from ..services.kb_file_service import (
 )
 from ..services.kb_file_service import (
     get_document_record_file_id as _get_document_record_file_id,
-)
-from ..services.kb_file_service import (
-    list_documents_for_user as _list_documents_for_user,
 )
 from ..services.kb_file_service import (
     resolve_document_filename as _resolve_document_filename,
@@ -170,45 +168,17 @@ async def save_collection_config(
     _user: User = Depends(get_current_user),
 ) -> CollectionOperationResult:
     """Save ingestion configuration for a specific collection."""
-    from datetime import datetime, timezone
+    from ...core.tools.core.RAG_tools.storage.factory import get_metadata_store
 
-    from ...core.tools.core.RAG_tools.LanceDB.schema_manager import (
-        ensure_collection_config_table,
-    )
-    from ...providers.vector_store.lancedb import get_connection_from_env
-
-    def _save_config() -> None:
-        conn = get_connection_from_env()
-        # TODO(refactor): keep collection_config as a compatibility store for
-        # per-user ingestion settings; unify this with metadata-backed storage
-        # once config ownership and migration strategy are finalized.
-        ensure_collection_config_table(conn)
-        table = conn.open_table("collection_config")
-
-        user_id_val = int(_user.id)
-        config_json = config.model_dump_json(exclude_unset=True)
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-
-        try:
-            # Try to delete existing configuration for this collection and user
-            table.delete(f"collection = '{collection}' AND user_id = {user_id_val}")
-        except Exception as e:
-            logger.warning(f"Error deleting old config: {e}")
-
-        # Insert new config
-        data = [
-            {
-                "collection": collection,
-                "config_json": config_json,
-                "updated_at": now,
-                "user_id": user_id_val,
-            }
-        ]
-
-        table.add(data)
+    config_json = config.model_dump_json(exclude_unset=True)
 
     try:
-        await asyncio.to_thread(_save_config)
+        metadata_store = get_metadata_store()
+        await metadata_store.save_collection_config(
+            collection=collection,
+            config_json=config_json,
+            user_id=int(_user.id),
+        )
 
         return CollectionOperationResult(
             status="success",
@@ -629,7 +599,7 @@ async def list_collections_api(
 
     try:
         result = await asyncio.wait_for(
-            asyncio.to_thread(list_collections, int(_user.id), bool(_user.is_admin)),
+            list_collections(user_id=int(_user.id), is_admin=bool(_user.is_admin)),
             timeout=kb_collections_timeout_seconds,
         )
         return result
@@ -670,7 +640,10 @@ async def search(
     ),
     filters: Optional[Dict[str, Any]] = Form(
         None,
-        description="Optional filters to apply during search (LanceDB format)",
+        description="Optional filters to apply during search. "
+        "Format: {field: value} for equality filters. "
+        "For advanced filters, use {field: {operator: str, value: Any}} "
+        "where operator can be: eq, ne, gt, gte, lt, lte, in, contains.",
     ),
     fusion_config: Optional[Dict[str, Any]] = Form(
         None,
@@ -1084,10 +1057,11 @@ async def delete_collection_api(
                 ),
             )
 
-        collection_records = _list_documents_for_user(
+        vector_store = get_vector_index_store()
+        collection_records = vector_store.list_document_records(
+            collection_name=collection_name,
             user_id=int(_user.id),
             is_admin=bool(_user.is_admin),
-            collection_name=collection_name,
         )
         collection_file_ids = {
             file_id
@@ -1099,7 +1073,8 @@ async def delete_collection_api(
 
         result = delete_collection(collection_name, int(_user.id), bool(_user.is_admin))
 
-        remaining_records = _list_documents_for_user(
+        remaining_records = vector_store.list_document_records(
+            collection_name=None,
             user_id=int(_user.id),
             is_admin=bool(_user.is_admin),
         )
@@ -1230,11 +1205,17 @@ async def check_documents_exist_api(
         if not requested:
             return {"existing_filenames": []}
 
-        records = _list_documents_for_user(
+        # Use storage abstraction layer to fetch document records
+        vector_store = get_vector_index_store()
+        records = vector_store.list_document_records(
+            collection_name=collection_name,
             user_id=int(_user.id),
             is_admin=False,
-            collection_name=collection_name,
+            max_results=DEFAULT_VECTOR_STORE_SCAN_LIMIT,
         )
+
+        # Build filename map from file_ids (for UploadedFile lookup)
+        # This preserves main branch's file_id -> filename resolution
         filename_map = _build_uploaded_filename_map(
             db,
             user_id=int(_user.id),
@@ -1249,6 +1230,7 @@ async def check_documents_exist_api(
 
         existing_filenames = set()
         for record in records:
+            # Resolve filename using file_id first, then fallback to source_path basename
             resolved_filename = _resolve_document_filename(record, filename_map)
             if resolved_filename:
                 existing_filenames.add(resolved_filename)
@@ -1297,34 +1279,41 @@ async def delete_document_api(
     # NOTE: Exceptions are normalized by @handle_kb_exceptions for consistent API responses.
     from ...core.tools.core.RAG_tools.management.collections import delete_document
 
-    records = _list_documents_for_user(
+    # Use storage abstraction layer to fetch document records
+    vector_store = get_vector_index_store()
+    records = vector_store.list_document_records(
+        collection_name=collection_name,
         user_id=int(_user.id),
         is_admin=bool(_user.is_admin),
-        collection_name=collection_name,
+        max_results=DEFAULT_VECTOR_STORE_SCAN_LIMIT,
     )
+
+    # Build filename map from file_ids (for UploadedFile lookup and advanced matching)
     filename_map = _build_uploaded_filename_map(
         db,
         user_id=int(_user.id),
         file_ids=[
-            current_file_id
-            for current_file_id in (
-                _get_document_record_file_id(record) for record in records
-            )
-            if current_file_id
+            file_id
+            for file_id in (_get_document_record_file_id(record) for record in records)
+            if file_id
         ],
     )
 
+    # Find all matching documents (handle duplicates)
     matching_docs = []
     for record in records:
-        current_doc_id = record.get("doc_id")
+        current_doc_id = record.doc_id
         current_file_id = _get_document_record_file_id(record)
         resolved_filename = _resolve_document_filename(record, filename_map)
+
+        # Support filtering by doc_id, file_id, or filename (main branch feature)
         if doc_id and current_doc_id != doc_id:
             continue
         if file_id and current_file_id != file_id:
             continue
         if not doc_id and not file_id and resolved_filename != filename:
             continue
+
         matching_docs.append(
             {
                 "doc_id": current_doc_id,
@@ -1342,7 +1331,9 @@ async def delete_document_api(
     deleted_doc_ids = []
     deletion_errors = []
 
-    remaining_records = _list_documents_for_user(
+    # Get remaining documents to check for orphaned UploadedFile records
+    remaining_records = vector_store.list_document_records(
+        collection_name=collection_name,
         user_id=int(_user.id),
         is_admin=bool(_user.is_admin),
     )
@@ -1431,19 +1422,14 @@ async def rename_collection_api(
     Returns:
         Success message
     """
-    from ...core.tools.core.RAG_tools.management.collections import (
-        _list_table_names,
-    )
     from ...core.tools.core.RAG_tools.management.status import (
         clear_ingestion_status,
         load_ingestion_status,
         write_ingestion_status,
     )
-    from ...core.tools.core.RAG_tools.utils.string_utils import (
-        escape_lancedb_string,
-    )
+    from ...core.tools.core.RAG_tools.storage.factory import get_vector_index_store
 
-    conn = get_connection_from_env()
+    vector_store = get_vector_index_store()
 
     if not new_name or not new_name.strip():
         raise HTTPException(
@@ -1471,15 +1457,15 @@ async def rename_collection_api(
     physical_rename_error: Optional[str] = None
     old_collection_dir: Optional[Path] = None
     new_collection_dir: Optional[Path] = None
+    collection_records = vector_store.list_document_records(
+        collection_name=collection_name,
+        user_id=int(_user.id),
+        is_admin=bool(_user.is_admin),
+    )
     collection_file_ids = {
         file_id
         for file_id in (
-            _get_document_record_file_id(record)
-            for record in _list_documents_for_user(
-                user_id=int(_user.id),
-                is_admin=bool(_user.is_admin),
-                collection_name=collection_name,
-            )
+            _get_document_record_file_id(record) for record in collection_records
         )
         if file_id
     }
@@ -1510,33 +1496,15 @@ async def rename_collection_api(
             ),
         )
 
-    # Step 2: Update collection name in all tables
-    table_names = _list_table_names(conn, warnings)
-
-    for table_name in ["documents", "parses", "chunks"]:
-        if table_name in table_names:
-            try:
-                table = conn.open_table(table_name)
-                table.update(
-                    f"collection = '{escape_lancedb_string(collection_name)}'",
-                    {"collection": new_name},
-                )
-            except Exception as e:
-                logger.warning("Failed to update '%s': %s", table_name, e)
-                warnings.append(f"Failed to update '{table_name}': {e}")
-
-    for table_name in table_names:
-        if not table_name.startswith("embeddings_"):
-            continue
-        try:
-            table = conn.open_table(table_name)
-            table.update(
-                f"collection = '{escape_lancedb_string(collection_name)}'",
-                {"collection": new_name},
-            )
-        except Exception as e:
-            logger.warning("Failed to update embeddings table '%s': %s", table_name, e)
-            warnings.append(f"Failed to update '{table_name}': {e}")
+    # Step 2: Update collection name in all tables (documents, parses, chunks, embeddings)
+    # Use storage abstraction layer which handles all tables including embeddings
+    vector_store = get_vector_index_store()
+    warnings.extend(
+        vector_store.rename_collection_data(
+            collection_name=collection_name,
+            new_name=new_name,
+        )
+    )
 
     # Migrate ingestion status from old collection name to new
     try:

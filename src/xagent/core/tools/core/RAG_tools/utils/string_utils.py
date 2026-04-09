@@ -6,7 +6,7 @@ import hashlib
 import re
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # Pattern for sanitizing document IDs and filenames
 # Only allows: letters, numbers, underscore, hyphen
@@ -32,21 +32,61 @@ def escape_lancedb_string(input_string: Any) -> str:
     return input_string.replace("\\", "\\\\").replace("'", "''")
 
 
-def build_lancedb_filter_expression(filters: Dict[str, Any]) -> str:
+def build_lancedb_filter_expression(
+    filters: Dict[str, Any],
+    *,
+    user_id: Optional[int] = None,
+    is_admin: bool = False,
+    skip_user_filter: bool = False,
+) -> str:
     """
     Builds a safe LanceDB filter expression from a dictionary of filters.
 
+    This function now uses the abstract filter layer internally for better
+    backend compatibility, while maintaining the same interface for
+    backward compatibility.
+
     Args:
         filters: A dictionary where keys are column names and values are the filter values.
+        user_id: Optional user ID for multi-tenancy filtering.
+        is_admin: Whether the user has admin privileges.
+        skip_user_filter: If True, bypasses user permission filter.
 
     Returns:
         A string representing the safely constructed LanceDB filter expression.
     """
-    filter_parts = []
+    from ..storage.contracts import (
+        FilterCondition,
+        FilterExpression,
+        FilterOperator,
+    )
+    from ..storage.factory import get_vector_index_store
+
+    # Convert to FilterCondition list
+    conditions: List[FilterCondition] = []
     for key, value in filters.items():
-        escaped_value = escape_lancedb_string(value)
-        filter_parts.append(f"{key} == '{escaped_value}'")
-    return " AND ".join(filter_parts)
+        conditions.append(
+            FilterCondition(field=key, operator=FilterOperator.EQ, value=value)
+        )
+
+    # Use abstract filter builder
+    vector_store = get_vector_index_store()
+
+    # Combine conditions with AND (tuple convention)
+    # Type: FilterExpression can be FilterCondition or tuple of FilterConditions
+    if len(conditions) == 1:
+        filter_expr: FilterExpression = conditions[0]
+    else:
+        filter_expr = tuple(conditions)
+
+    # Get backend-specific syntax
+    backend_filter = vector_store.build_filter_expression(
+        filters=filter_expr,
+        user_id=user_id if not skip_user_filter else None,
+        is_admin=is_admin or skip_user_filter,
+    )
+
+    return backend_filter or ""
 
 
 def sanitize_for_doc_id(text: str, max_length: int = 64) -> str:
