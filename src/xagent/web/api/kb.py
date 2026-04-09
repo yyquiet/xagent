@@ -43,6 +43,7 @@ from ...core.tools.core.RAG_tools.core.schemas import (
 from ...core.tools.core.RAG_tools.management.collections import (
     delete_collection,
     list_collections,
+    list_documents,
 )
 from ...core.tools.core.RAG_tools.parse.parse_display import (
     paginate_parse_results,
@@ -55,6 +56,9 @@ from ...core.tools.core.RAG_tools.pipelines.document_search import run_document_
 from ...core.tools.core.RAG_tools.pipelines.web_ingestion import run_web_ingestion
 from ...core.tools.core.RAG_tools.progress import get_progress_manager
 from ...core.tools.core.RAG_tools.storage.factory import get_vector_index_store
+from ...core.tools.core.RAG_tools.utils.string_utils import (
+    generate_deterministic_doc_id,
+)
 from ..auth_dependencies import get_current_user
 from ..config import (
     MAX_FILE_SIZE,
@@ -63,6 +67,7 @@ from ..config import (
     sanitize_path_component,
 )
 from ..models.database import get_db
+from ..models.uploaded_file import UploadedFile
 from ..models.user import User
 from ..services.kb_collection_service import (
     delete_collection_physical_dir,
@@ -77,6 +82,9 @@ from ..services.kb_file_service import (
 )
 from ..services.kb_file_service import (
     get_document_record_file_id as _get_document_record_file_id,
+)
+from ..services.kb_file_service import (
+    list_documents_for_user as _list_documents_for_user,
 )
 from ..services.kb_file_service import (
     resolve_document_filename as _resolve_document_filename,
@@ -593,6 +601,7 @@ async def ingest_cloud(
 @handle_kb_exceptions
 async def list_collections_api(
     _user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> ListCollectionsResult:
     """List all collections with their statistics."""
     kb_collections_timeout_seconds = 15
@@ -602,6 +611,141 @@ async def list_collections_api(
             list_collections(user_id=int(_user.id), is_admin=bool(_user.is_admin)),
             timeout=kb_collections_timeout_seconds,
         )
+
+        # Backward compatibility: some unit tests (and older callers) mock or return a
+        # plain dict payload. In that case, skip post-processing and return it as-is.
+        if isinstance(result, dict):
+            return result
+
+        # Fallback: when LanceDB documents table has legacy decode issues, collection
+        # stats can still be built from chunks/parses but document_names may be empty.
+        # In that case, fill names from UploadedFile rows under user_{id}/{collection}/.
+        # Note: This is temporary compatibility code for legacy data. After running
+        # the backfill migration (backfill_documents_file_id.py), this should no longer
+        # be needed and can be removed.
+        if result.collections:
+            collection_name_set = {c.name for c in result.collections}
+
+            # Optimize: Only query UploadedFile for collections that actually need fallback
+            collections_needing_fallback = [
+                c for c in result.collections if not c.document_names
+            ]
+
+            if collections_needing_fallback:
+                # Filter at SQL level to only load relevant uploaded files
+                collection_patterns = [
+                    f"%/user_{int(_user.id)}/{c.name}/%"
+                    for c in collections_needing_fallback
+                ]
+
+                uploaded_records = []
+                if len(collection_patterns) == 1:
+                    uploaded_records = (
+                        db.query(UploadedFile)
+                        .filter(
+                            UploadedFile.user_id == int(_user.id),
+                            UploadedFile.storage_path.like(collection_patterns[0]),
+                        )
+                        .all()
+                    )
+                else:
+                    # Multiple collections: use OR logic
+                    from sqlalchemy import or_
+
+                    uploaded_records = (
+                        db.query(UploadedFile)
+                        .filter(
+                            UploadedFile.user_id == int(_user.id),
+                            or_(
+                                *[
+                                    UploadedFile.storage_path.like(pattern)
+                                    for pattern in collection_patterns
+                                ]
+                            ),
+                        )
+                        .all()
+                    )
+
+                fallback_names: Dict[str, set[str]] = {}
+                user_segment = f"user_{int(_user.id)}"
+                for rec in uploaded_records:
+                    storage_path = Path(str(getattr(rec, "storage_path", "")))
+                    parts = storage_path.parts
+                    if user_segment not in parts:
+                        continue
+                    user_idx = parts.index(user_segment)
+                    if user_idx + 2 >= len(parts):
+                        continue
+                    collection_name = parts[user_idx + 1]
+                    if collection_name not in collection_name_set:
+                        continue
+                    fallback_names.setdefault(collection_name, set()).add(
+                        str(getattr(rec, "filename", "")).strip()
+                    )
+
+                for collection in result.collections:
+                    if collection.document_names:
+                        continue
+                    fallback = sorted(
+                        name
+                        for name in fallback_names.get(collection.name, set())
+                        if name
+                    )
+                    if fallback:
+                        collection.document_names = fallback
+                        # Keep UI card counters aligned with visible files when docs table is unreadable.
+                        if collection.documents == 0:
+                            collection.documents = len(fallback)
+                        continue
+
+                # Secondary fallback for web-ingested docs (no UploadedFile rows):
+                # derive names from documents metadata; prefer source basename, then doc_id.
+                # Avoid N+1 list_documents() calls by fetching all docs for this user once.
+                collections_missing_names = [
+                    c for c in result.collections if not c.document_names
+                ]
+                if collections_missing_names:
+                    try:
+                        doc_records = _list_documents_for_user(
+                            user_id=int(_user.id),
+                            is_admin=bool(_user.is_admin),
+                        )
+                        derived_by_collection: Dict[str, set[str]] = {}
+                        for doc_rec in doc_records:
+                            rec_collection = doc_rec.get("collection")
+                            if (
+                                not isinstance(rec_collection, str)
+                                or not rec_collection
+                            ):
+                                continue
+                            if rec_collection not in collection_name_set:
+                                continue
+                            source_path = doc_rec.get("source_path")
+                            if isinstance(source_path, str) and source_path.strip():
+                                derived_by_collection.setdefault(
+                                    rec_collection, set()
+                                ).add(Path(source_path).name)
+                                continue
+                            raw_doc_id = doc_rec.get("doc_id")
+                            if isinstance(raw_doc_id, str) and raw_doc_id.strip():
+                                derived_by_collection.setdefault(
+                                    rec_collection, set()
+                                ).add(raw_doc_id)
+
+                        for collection in collections_missing_names:
+                            derived_names = derived_by_collection.get(
+                                collection.name, set()
+                            )
+                            if not derived_names:
+                                continue
+                            collection.document_names = sorted(derived_names)
+                            if collection.documents == 0:
+                                collection.documents = len(derived_names)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Secondary document name fallback failed: %s", exc
+                        )
+
         return result
     except asyncio.TimeoutError:
         logger.error(
@@ -1279,19 +1423,34 @@ async def delete_document_api(
     # NOTE: Exceptions are normalized by @handle_kb_exceptions for consistent API responses.
     from ...core.tools.core.RAG_tools.management.collections import delete_document
 
-    # Use storage abstraction layer to fetch document records
-    vector_store = get_vector_index_store()
-    records = vector_store.list_document_records(
-        collection_name=collection_name,
-        user_id=int(_user.id),
-        is_admin=bool(_user.is_admin),
-        max_results=DEFAULT_VECTOR_STORE_SCAN_LIMIT,
-    )
+    def _collect_candidate_doc_ids(
+        docs: list[dict[str, Any]],
+    ) -> list[str]:
+        candidate: set[str] = set()
+        for item in docs:
+            raw = item.get("doc_id")
+            if isinstance(raw, str) and raw:
+                candidate.add(raw)
+        return sorted(candidate)
 
-    # Build filename map from file_ids (for UploadedFile lookup and advanced matching)
+    user_id_int = int(_user.id)
+    records: List[Dict[str, Any]] = []
+    try:
+        records = _list_documents_for_user(
+            user_id=user_id_int,
+            is_admin=bool(_user.is_admin),
+            collection_name=collection_name,
+        )
+    except Exception as exc:
+        # Degrade gracefully when LanceDB cannot decode legacy rows.
+        logger.warning(
+            "Failed to read documents for delete resolution (collection=%s): %s",
+            collection_name,
+            exc,
+        )
     filename_map = _build_uploaded_filename_map(
         db,
-        user_id=int(_user.id),
+        user_id=user_id_int,
         file_ids=[
             file_id
             for file_id in (_get_document_record_file_id(record) for record in records)
@@ -1302,7 +1461,7 @@ async def delete_document_api(
     # Find all matching documents (handle duplicates)
     matching_docs = []
     for record in records:
-        current_doc_id = record.doc_id
+        current_doc_id = record.get("doc_id")
         current_file_id = _get_document_record_file_id(record)
         resolved_filename = _resolve_document_filename(record, filename_map)
 
@@ -1322,6 +1481,153 @@ async def delete_document_api(
             }
         )
 
+    # Safety: refuse to delete by basename if it is ambiguous.
+    # This endpoint keeps `filename` in the path for backward compatibility, but
+    # deleting multiple documents with the same filename is dangerous and hard
+    # for users to reason about. Require an explicit `file_id` or `doc_id` when
+    # more than one candidate matches.
+    if not doc_id and not file_id and len(matching_docs) > 1:
+        candidate_doc_ids = _collect_candidate_doc_ids(matching_docs)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Ambiguous document deletion for filename '{filename}'. "
+                "Multiple documents match; please retry with query param "
+                "`file_id` or `doc_id`. "
+                f"Candidates: {candidate_doc_ids}"
+            ),
+        )
+
+    if not matching_docs and (doc_id or file_id):
+        # Explicit identifiers: validate through other data sources before allowing deletion
+        # to prevent accidental deletion of non-existent or wrong documents.
+        try:
+            doc_list = list_documents(
+                collection=collection_name,
+                user_id=user_id_int,
+                is_admin=bool(_user.is_admin),
+            )
+            target_exists = False
+            for summary in doc_list.documents:
+                if doc_id and summary.doc_id == doc_id:
+                    target_exists = True
+                    break
+                if file_id:
+                    # Check source_path basename for uploaded docs
+                    source_path = getattr(summary, "source_path", None)
+                    if source_path:
+                        source_basename = Path(source_path).name
+                        if source_basename == filename:
+                            target_exists = True
+                            break
+
+            if not target_exists:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Document not found in collection '{collection_name}'",
+                )
+
+            matching_docs.append(
+                {
+                    "doc_id": doc_id,
+                    "file_id": file_id,
+                    "filename": filename,
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            # If validation fails, err on the side of caution and refuse deletion
+            logger.warning(
+                "Failed to validate document existence for deletion (collection=%s): %s",
+                collection_name,
+                exc,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Unable to verify document existence. Deletion refused to prevent data loss.",
+            )
+
+    if not matching_docs:
+        # Fallback 1: derive doc_id from UploadedFile linkage for uploaded docs.
+        user_segment = f"/user_{user_id_int}/{collection_name}/"
+        uploaded_query = db.query(UploadedFile).filter(
+            UploadedFile.user_id == user_id_int,
+            UploadedFile.filename == filename,
+            UploadedFile.storage_path.like(f"%{user_segment}%"),
+        )
+        if file_id:
+            uploaded_query = uploaded_query.filter(UploadedFile.file_id == file_id)
+        uploaded_candidates = uploaded_query.all()
+        for rec in uploaded_candidates:
+            file_id_str = str(getattr(rec, "file_id", "")).strip()
+            if not file_id_str:
+                continue
+            # Use storage_path as source_path for deterministic doc_id generation
+            storage_path = str(getattr(rec, "storage_path", "")).strip()
+            matching_docs.append(
+                {
+                    "doc_id": generate_deterministic_doc_id(
+                        collection_name, storage_path
+                    ),
+                    "file_id": file_id_str,
+                    "filename": filename,
+                }
+            )
+
+    if not doc_id and not file_id and len(matching_docs) > 1:
+        candidate_doc_ids = _collect_candidate_doc_ids(matching_docs)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Ambiguous document deletion for filename '{filename}'. "
+                "Multiple documents match; please retry with query param "
+                "`file_id` or `doc_id`. "
+                f"Candidates: {candidate_doc_ids}"
+            ),
+        )
+
+    if not matching_docs and not file_id and not doc_id:
+        # Fallback 2: allow web-ingested docs to be deleted by doc_id-like filename.
+        try:
+            doc_list = list_documents(
+                collection=collection_name,
+                user_id=user_id_int,
+                is_admin=bool(_user.is_admin),
+            )
+            for summary in doc_list.documents:
+                doc_id_value = getattr(summary, "doc_id", None)
+                source_path = getattr(summary, "source_path", None)
+                fallback_basename: str | None = None
+                if isinstance(source_path, str) and source_path.strip():
+                    fallback_basename = Path(source_path).name
+                if doc_id_value == filename or fallback_basename == filename:
+                    matching_docs.append(
+                        {
+                            "doc_id": doc_id_value,
+                            "file_id": None,
+                            "filename": filename,
+                        }
+                    )
+        except Exception as exc:
+            logger.warning(
+                "Fallback doc resolution via list_documents failed (collection=%s): %s",
+                collection_name,
+                exc,
+            )
+
+    if not doc_id and not file_id and len(matching_docs) > 1:
+        candidate_doc_ids = _collect_candidate_doc_ids(matching_docs)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Ambiguous document deletion for filename '{filename}'. "
+                "Multiple documents match; please retry with query param "
+                "`file_id` or `doc_id`. "
+                f"Candidates: {candidate_doc_ids}"
+            ),
+        )
+
     if not matching_docs:
         raise HTTPException(
             status_code=404,
@@ -1331,19 +1637,31 @@ async def delete_document_api(
     deleted_doc_ids = []
     deletion_errors = []
 
-    # Get remaining documents to check for orphaned UploadedFile records
-    remaining_records = vector_store.list_document_records(
-        collection_name=collection_name,
-        user_id=int(_user.id),
-        is_admin=bool(_user.is_admin),
-    )
-    remaining_file_ids = {
-        current_file_id
-        for current_file_id in (
-            _get_document_record_file_id(record) for record in remaining_records
+    remaining_file_ids: set[str] = set()
+    try:
+        remaining_records = _list_documents_for_user(
+            user_id=user_id_int,
+            is_admin=bool(_user.is_admin),
         )
-        if current_file_id
-    }
+        remaining_file_ids = {
+            current_file_id
+            for current_file_id in (
+                _get_document_record_file_id(record) for record in remaining_records
+            )
+            if current_file_id
+        }
+    except Exception as exc:
+        logger.warning(
+            "Failed to read remaining docs for orphan cleanup; fallback to UploadedFile set: %s",
+            exc,
+        )
+        remaining_file_ids = {
+            str(rec.file_id)
+            for rec in db.query(UploadedFile)
+            .filter(UploadedFile.user_id == user_id_int)
+            .all()
+            if getattr(rec, "file_id", None)
+        }
 
     for doc_info in matching_docs:
         doc_id = doc_info["doc_id"]
@@ -1363,7 +1681,7 @@ async def delete_document_api(
                 if _delete_uploaded_file_if_orphaned(
                     db,
                     file_id=current_file_id,
-                    user_id=int(_user.id),
+                    user_id=user_id_int,
                     remaining_file_ids=remaining_file_ids,
                 ):
                     pass

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
@@ -31,10 +31,13 @@ from src.xagent.core.tools.core.RAG_tools.management import (
     delete_collection,
     get_document_stats,
     list_collections,
+    list_documents,
     retry_document,
 )
 from src.xagent.core.tools.core.RAG_tools.management.status import load_ingestion_status
 from src.xagent.core.tools.core.RAG_tools.storage import get_vector_index_store
+from src.xagent.providers.vector_store.lancedb import get_connection_from_env
+from xagent.core.tools.core.RAG_tools.file.register_document import register_document
 
 
 @pytest.fixture()
@@ -139,7 +142,7 @@ async def test_list_collections_with_data(temp_lancedb_dir: str) -> None:
 
     collection = "demo_collection"
     doc_id = "doc-1"
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     _insert_documents(
         [
@@ -227,7 +230,7 @@ async def test_list_collections_admin_includes_config_from_other_user(
 
     collection = "cfg_tenant_collection"
     doc_id = "doc-cfg"
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     _insert_documents(
         [
@@ -277,7 +280,7 @@ def test_get_document_stats_with_embeddings(temp_lancedb_dir: str) -> None:
 
     collection = "demo_collection"
     doc_id = "doc-embed"
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     _insert_documents(
         [
@@ -326,7 +329,7 @@ def test_cancel_collection_updates_all_documents(temp_lancedb_dir: str) -> None:
     """Collection-level cancel should update status for all discoverable documents."""
 
     collection = "demo"
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     _insert_documents(
         [
@@ -357,7 +360,7 @@ def test_delete_collection_invokes_cleanup_all_documents(
     """Collection delete should cascade cleanup for each document variant."""
 
     collection = "demo"
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     _insert_documents(
         [
@@ -389,3 +392,48 @@ def test_delete_collection_invokes_cleanup_all_documents(
 
     assert result.status == "success"
     assert "documents" in result.deleted_counts
+
+
+def test_e2e_register_and_list_documents_with_legacy_empty_string_file_id(
+    tmp_path: Path, temp_lancedb_dir: str
+) -> None:
+    """E2E: ingestion remains visible when legacy rows contain empty string file_id."""
+    conn = get_connection_from_env()
+    ensure_documents_table(conn)
+    table = conn.open_table("documents")
+
+    # Simulate legacy row created by previous PR's backfill (NULL -> "")
+    table.add(
+        [
+            {
+                "collection": "xagent",
+                "doc_id": "legacy-doc",
+                "file_id": "",  # Empty string from previous backfill
+                "source_path": "/legacy/README.md",
+                "file_type": "md",
+                "content_hash": "legacy-hash",
+                "uploaded_at": datetime.now(timezone.utc),
+                "title": "legacy",
+                "language": "en",
+                "user_id": None,
+            }
+        ]
+    )
+
+    # Trigger schema ensure path again (startup/runtime behavior) to backfill.
+    ensure_documents_table(conn)
+
+    new_file = tmp_path / "README.md"
+    new_file.write_text("# hello\n\nworld", encoding="utf-8")
+    reg_result = register_document(
+        collection="xagent",
+        source_path=str(new_file),
+        file_id=None,
+        user_id=58,
+    )
+    assert reg_result["doc_id"]
+
+    list_result = list_documents(collection="xagent", user_id=58, is_admin=False)
+    assert list_result.status == "success"
+    listed_ids = {doc.doc_id for doc in list_result.documents}
+    assert reg_result["doc_id"] in listed_ids

@@ -70,6 +70,42 @@ class TestRegisterDocument:
         )
         assert record["file_id"] == "file-123"
 
+    def test_register_document_preserves_none_file_id(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Registrations without file_id should persist None (not empty string)."""
+        db_dir = tmp_path / "lancedb"
+        monkeypatch.setenv("LANCEDB_DIR", str(db_dir))
+
+        test_file = tmp_path / "test_no_file_id.txt"
+        test_file.write_text("Test content without file_id")
+
+        response = register_document(
+            collection="test_collection",
+            source_path=str(test_file),
+            file_id=None,
+        )
+
+        conn = get_connection_from_env()
+        table = conn.open_table("documents")
+        record = (
+            table.search()
+            .where(
+                f"collection = 'test_collection' AND doc_id = '{response['doc_id']}'"
+            )
+            .to_pandas()
+            .iloc[0]
+        )
+        # Should be None, not empty string (new registrations preserve None)
+        # Use pd.isna to handle both None and pandas NA values
+        import pandas as pd
+
+        assert record["file_id"] != "", "file_id must not be empty string for new rows"
+        assert record["file_id"] is None or pd.isna(record["file_id"]), (
+            f"file_id should be None or NA, got {record['file_id']!r} "
+            f"(type: {type(record['file_id']).__name__})"
+        )
+
     def test_register_document_auto_file_type_detection(
         self, tmp_path: Path, monkeypatch
     ) -> None:

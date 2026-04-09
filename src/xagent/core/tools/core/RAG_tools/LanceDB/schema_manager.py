@@ -151,6 +151,9 @@ def ensure_documents_table(conn: DBConnection) -> None:
 
     _add_user_id_column(conn, "documents")
     _create_table(conn, "documents", schema=schema)
+    # Note: backfill of file_id and user_id is now handled by standalone migration script:
+    #   python -m xagent.migrations.lancedb.backfill_documents_file_id
+    # This keeps the hot path (schema ensure) fast and separation of concerns.
 
 
 def ensure_parses_table(conn: DBConnection) -> None:
