@@ -210,8 +210,8 @@ async def startup_event() -> None:
     )
 
     # Auto-migrate LanceDB tables if needed (for multi-tenancy support)
-    # Controlled by LANCEDB_AUTO_MIGRATE environment variable (default: false)
-    auto_migrate = os.getenv("LANCEDB_AUTO_MIGRATE", "false").lower() == "true"
+    # Controlled by LANCEDB_AUTO_MIGRATE environment variable (default: true)
+    auto_migrate = os.getenv("LANCEDB_AUTO_MIGRATE", "true").lower() == "true"
 
     try:
         from ..core.tools.core.RAG_tools.LanceDB.schema_manager import (
@@ -330,13 +330,29 @@ async def startup_event() -> None:
             e,
         )
 
-    # Auto-backfill documents table if needed (for file_id and user_id consistency)
+    # Auto-fix file_id nullability and backfill documents table if needed
     # Controlled by LANCEDB_AUTO_MIGRATE environment variable (default: false)
     if auto_migrate:
         try:
             from ..providers.vector_store.lancedb import get_connection_from_env
 
             conn = get_connection_from_env()
+
+            # Fix file_id nullability before any backfill (must run first since
+            # the backfill reads the table and will crash if file_id is
+            # non-nullable with null values)
+            try:
+                from ..migrations.lancedb.fix_file_id_nullable import (
+                    fix_file_id_nullable,
+                )
+
+                fix_result = fix_file_id_nullable(dry_run=False, conn=conn)
+                if fix_result.get("fixed"):
+                    logger.info(
+                        "Auto-fixed file_id column to nullable in documents table"
+                    )
+            except Exception as e:
+                logger.warning("Could not fix file_id nullability: %s", e)
 
             # Check if documents table exists and needs backfill
             try:

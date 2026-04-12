@@ -3,8 +3,11 @@
 import asyncio
 import concurrent.futures
 import functools
+import hashlib
 import json
 import logging
+import mimetypes
+import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TypeVar, cast
 
@@ -54,7 +57,10 @@ from ...core.tools.core.RAG_tools.pipelines.document_ingestion import (
     run_document_ingestion,
 )
 from ...core.tools.core.RAG_tools.pipelines.document_search import run_document_search
-from ...core.tools.core.RAG_tools.pipelines.web_ingestion import run_web_ingestion
+from ...core.tools.core.RAG_tools.pipelines.web_ingestion import (
+    FileHandlerResult,
+    run_web_ingestion,
+)
 from ...core.tools.core.RAG_tools.progress import get_progress_manager
 from ...core.tools.core.RAG_tools.storage.factory import get_vector_index_store
 from ...core.tools.core.RAG_tools.utils.string_utils import (
@@ -67,7 +73,7 @@ from ..config import (
     is_allowed_file,
     sanitize_path_component,
 )
-from ..models.database import get_db
+from ..models.database import get_db, get_session_local
 from ..models.uploaded_file import UploadedFile
 from ..models.user import User
 from ..services.kb_collection_service import (
@@ -305,23 +311,12 @@ async def ingest(
         # SECURITY: Validate collection name at API boundary
         safe_collection = sanitize_path_component(collection, "collection")
 
-        try:
-            file_path = get_upload_path(
-                safe_filename,
-                user_id=int(_user.id),
-                collection=safe_collection,
-                collection_is_sanitized=True,
-            )
-        except TypeError as e:
-            # Backward compatibility for tests/mocks that patch get_upload_path
-            # with an older signature that doesn't accept this keyword.
-            if "collection_is_sanitized" not in str(e):
-                raise
-            file_path = get_upload_path(
-                safe_filename,
-                user_id=int(_user.id),
-                collection=safe_collection,
-            )
+        file_path = get_upload_path(
+            safe_filename,
+            user_id=int(_user.id),
+            collection=safe_collection,
+            collection_is_sanitized=True,
+        )
     except ValueError as e:
         logger.warning("Invalid collection name rejected: %s - %s", collection, e)
         raise HTTPException(
@@ -364,8 +359,6 @@ async def ingest(
         raise
 
     # Register file in unified file management (file_id) for KB + file APIs.
-    import mimetypes
-
     mime_type = (
         getattr(file, "content_type", None)
         or mimetypes.guess_type(safe_filename)[0]
@@ -537,8 +530,6 @@ async def ingest_cloud(
                             message=f"Download failed: {str(e)}",
                             doc_id=file_info.fileName,
                         )
-
-                    import mimetypes
 
                     file_record = _upsert_uploaded_file_record(
                         db,
@@ -1093,6 +1084,7 @@ async def ingest_web(
         description="Delay between retries in seconds (default: 1.0)",
     ),
     _user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> WebIngestionResult | JSONResponse:
     """Ingest website content into the knowledge base.
 
@@ -1213,6 +1205,165 @@ async def ingest_web(
             ),
         )
 
+        # Track processed URLs to prevent duplicate UploadedFile records
+        # Key: URL hash, Value: file_id
+        # Note: For large-scale web ingestion (>10000 pages), consider using
+        # a bounded-size dict (e.g., with maxitems) to control memory usage.
+        _processed_urls: Dict[str, str] = {}
+
+        # Define file handler for persistent storage and UploadedFile record creation
+        def _handle_web_file(
+            temp_file_path: Path,
+            title: str,
+            collection_name: str,
+            url: str,
+            db_session: Session,
+        ) -> FileHandlerResult:
+            """Handle file persistence and UploadedFile record creation for web ingestion.
+
+            This function:
+            1. Checks if a file with this URL already exists (URL-based deduplication)
+            2. If exists, reuses the existing file and UploadedFile record
+            3. If not, copies the temporary file to the persistent uploads directory
+            4. Creates an UploadedFile record in the database
+            5. Returns the file_path and file_id for ingestion
+
+            Args:
+                temp_file_path: Path to the temporary markdown file
+                title: Page title (used for display)
+                collection_name: Collection name for organizing files
+                url: Source URL (used for unique identification)
+
+            Returns:
+                FileHandlerResult with file_path and optional file_id
+            """
+            # Use URL hash for unique filename (true URL deduplication)
+            # Using SHA256 for better collision resistance than MD5
+            # Include collection to prevent cross-collection file sharing
+            url_hash = hashlib.sha256(f"{collection_name}:{url}".encode()).hexdigest()[
+                :16
+            ]
+            safe_title = (
+                sanitize_path_component(title, "filename") if title else "untitled"
+            )
+            filename = f"{url_hash}_{safe_title}.md"
+
+            # Check if we've already processed this URL (in-memory cache)
+            if url_hash in _processed_urls:
+                existing_file_id = _processed_urls[url_hash]
+                logger.info(
+                    f"Reusing existing UploadedFile record for web ingestion: "
+                    f"url={url}, file_id={existing_file_id}"
+                )
+                # Query the database to get the storage path
+                existing_record = (
+                    db_session.query(UploadedFile)
+                    .filter(UploadedFile.file_id == existing_file_id)
+                    .first()
+                )
+                if existing_record:
+                    return FileHandlerResult(
+                        file_path=str(existing_record.storage_path),
+                        file_id=str(existing_record.file_id),
+                    )
+                else:
+                    # Cached file_id was deleted from DB, fall through to recreate
+                    logger.warning(
+                        f"Cached file_id {existing_file_id} not found in DB (record was deleted), "
+                        f"will create new record for url={url}"
+                    )
+
+            # Check database for existing file with same URL hash (cross-session deduplication)
+            existing_record = (
+                db_session.query(UploadedFile)
+                .filter(
+                    UploadedFile.user_id == int(_user.id),
+                    UploadedFile.filename == filename,
+                )
+                .first()
+            )
+
+            if existing_record:
+                logger.info(
+                    f"Found existing UploadedFile record from previous session: "
+                    f"url={url}, file_id={existing_record.file_id}"
+                )
+                _processed_urls[url_hash] = str(existing_record.file_id)
+                return FileHandlerResult(
+                    file_path=str(existing_record.storage_path),
+                    file_id=str(existing_record.file_id),
+                )
+
+            # Generate persistent file path
+            persistent_file = get_upload_path(
+                filename,
+                user_id=int(_user.id),
+                collection=collection_name,
+                collection_is_sanitized=True,
+            )
+
+            # Ensure directory exists
+            persistent_file.parent.mkdir(parents=True, exist_ok=True)
+
+            try:
+                # Copy file to persistent location
+                shutil.copy2(temp_file_path, persistent_file)
+                logger.info(
+                    f"Copied web ingestion file from {temp_file_path} to {persistent_file}"
+                )
+
+                # Create UploadedFile record
+                file_record = _upsert_uploaded_file_record(
+                    db_session,
+                    user_id=int(_user.id),
+                    filename=filename,
+                    storage_path=persistent_file,
+                    mime_type="text/markdown",
+                    file_size=persistent_file.stat().st_size,
+                )
+
+                logger.info(
+                    f"Created UploadedFile record for web ingestion: file_id={file_record.file_id}, "
+                    f"filename={filename}, url={url}"
+                )
+
+                # Track this URL to prevent duplicates
+                _processed_urls[url_hash] = str(file_record.file_id)
+
+                return FileHandlerResult(
+                    file_path=str(persistent_file),
+                    file_id=str(file_record.file_id),
+                )
+            except Exception:
+                # Clean up orphaned persistent file if upsert failed
+                if persistent_file.exists():
+                    try:
+                        persistent_file.unlink()
+                        logger.warning(
+                            f"Cleaned up orphaned persistent file due to upsert failure: {persistent_file}"
+                        )
+                    except Exception as cleanup_error:
+                        logger.warning(
+                            f"Failed to clean up orphaned persistent file {persistent_file}: {cleanup_error}"
+                        )
+                raise
+
+        # Create a wrapper that creates a dedicated DB session for the executor thread
+        # This avoids sharing the request thread's session across thread boundaries,
+        # which is fragile and could break with concurrent access.
+        def _file_handler_with_db(
+            temp_file_path: Path, title: str, collection_name: str, url: str
+        ) -> FileHandlerResult:
+            # Create a new session for this thread
+            SessionLocal = get_session_local()
+            db_session = SessionLocal()
+            try:
+                return _handle_web_file(
+                    temp_file_path, title, collection_name, url, db_session
+                )
+            finally:
+                db_session.close()
+
         result = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: asyncio.run(
@@ -1222,6 +1373,7 @@ async def ingest_web(
                     ingestion_config=ingestion_config,
                     user_id=int(_user.id),
                     is_admin=bool(_user.is_admin),
+                    file_handler=_file_handler_with_db,
                 )
             ),
         )
