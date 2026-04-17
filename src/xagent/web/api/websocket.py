@@ -1595,7 +1595,7 @@ async def handle_chat_message(
                     force_fresh_execution = was_completed_or_failed
                     if force_fresh_execution:
                         logger.info(
-                            f"✅ Confirmed: Task {task_id} was completed/failed, forcing fresh execution"
+                            f"Confirmed: Task {task_id} was completed/failed, forcing fresh execution"
                         )
 
                     # Create background task execution, don't block WebSocket message loop
@@ -2989,6 +2989,9 @@ async def handle_build_preview_execution(
             # Get all tools and filter by category using metadata
             from ...core.tools.adapters.vibe.factory import ToolFactory
 
+            has_mcp = bool(
+                tool_categories and any(tc.startswith("mcp:") for tc in tool_categories)
+            )
             temp_config = WebToolConfig(
                 db=db,
                 request=MinimalRequest(int(user.id)),
@@ -2996,7 +2999,7 @@ async def handle_build_preview_execution(
                 user_id=int(user.id),
                 is_admin=bool(user.is_admin),
                 workspace_config=None,
-                include_mcp_tools=False,
+                include_mcp_tools=has_mcp,
                 task_id=None,
                 browser_tools_enabled=True,
             )
@@ -3009,11 +3012,28 @@ async def handle_build_preview_execution(
                 for tool in all_tools:
                     if hasattr(tool, "metadata") and hasattr(tool.metadata, "category"):
                         category = str(tool.metadata.category.value)
+                        tool_name = getattr(tool, "name", None)
+
                         if category in tool_categories:
-                            # Tool protocol doesn't guarantee name attribute, use getattr
-                            tool_name = getattr(tool, "name", None)
                             if tool_name:
                                 allowed_tools.append(tool_name)
+                        elif category == "mcp" and tool_name:
+                            for tc in tool_categories:
+                                if tc.startswith("mcp:"):
+                                    server_name = (
+                                        tc.split(":", 1)[1]
+                                        .replace(" ", "_")
+                                        .replace("-", "_")
+                                    )
+                                    logger.info(
+                                        f"Checking MCP tool: '{tool_name}' vs 'mcp_{server_name}_'"
+                                    )
+                                    # Use case-insensitive matching for MCP server prefix
+                                    if tool_name.lower().startswith(
+                                        f"mcp_{server_name.lower()}_"
+                                    ):
+                                        allowed_tools.append(tool_name)
+                                        break
 
                 return allowed_tools
 
@@ -3034,6 +3054,9 @@ async def handle_build_preview_execution(
             task_id=preview_task_id,
             workspace_base_dir=str(get_uploads_dir() / "build_preview"),
             vision_model=vision_llm,  # Pass vision model for tool creation
+            include_mcp_tools=bool(
+                tool_categories and any(tc.startswith("mcp:") for tc in tool_categories)
+            ),
         )
 
         # Create sandbox for preview task

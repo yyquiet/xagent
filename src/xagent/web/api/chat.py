@@ -151,7 +151,9 @@ async def create_default_tools(
             "base_dir": str(get_uploads_dir() / f"user_{user.id}"),
             "task_id": task_id,
         },
-        include_mcp_tools=False,  # Exclude MCP tools for default agent
+        include_mcp_tools=bool(
+            allowed_tools and any(t.startswith("mcp_") for t in allowed_tools)
+        ),
         task_id=task_id,  # Pass task_id for browser session tracking
         browser_tools_enabled=True,  # Enable browser automation tools
         allowed_collections=allowed_collections,  # Agent Builder knowledge bases
@@ -635,7 +637,7 @@ class AgentServiceManager:
                         user_id=int(user.id),
                         is_admin=bool(user.is_admin),
                         workspace_config=None,
-                        include_mcp_tools=False,
+                        include_mcp_tools=True,
                         task_id=None,
                         browser_tools_enabled=True,
                         allowed_collections=agent_config.get("knowledge_bases"),
@@ -651,13 +653,33 @@ class AgentServiceManager:
                             tool.metadata, "category"
                         ):
                             category = str(tool.metadata.category.value)
+                            tool_name = getattr(tool, "name", None)
+
+                            # Standard category match
                             if category in tool_categories:
-                                tool_name = getattr(tool, "name", None)
                                 if tool_name:
                                     allowed_tools.append(tool_name)
+                            # Support for specific MCP server selection ("mcp:ServerName")
+                            elif category == "mcp" and tool_name:
+                                for tc in tool_categories:
+                                    if tc.startswith("mcp:"):
+                                        # Use the exact raw server name for prefix comparison, just replace spaces with underscores
+                                        # as done in mcp_adapter.py (e.g. "LinkedIn" -> "LinkedIn", "Google Drive" -> "Google_Drive")
+                                        server_name = (
+                                            tc.split(":", 1)[1]
+                                            .replace(" ", "_")
+                                            .replace("-", "_")
+                                        )
+
+                                        # mcp_adapter prefix is f"mcp_{server_name}_" where server_name preserves original case
+                                        if tool_name.lower().startswith(
+                                            f"mcp_{server_name.lower()}_"
+                                        ):
+                                            allowed_tools.append(tool_name)
+                                            break
 
                     logger.info(
-                        f"🔧 Tool categories {tool_categories} mapped to {len(allowed_tools)} tools for task {task_id}"
+                        f"Tool categories {tool_categories} mapped to {len(allowed_tools)} tools for task {task_id}"
                     )
 
                 # Get or create sandbox for this user
@@ -707,7 +729,7 @@ class AgentServiceManager:
                             else {}
                         )
                         logger.info(
-                            f"🔧 Extracting Text2SQL config: {list(config.keys())}"
+                            f"Extracting Text2SQL config: {list(config.keys())}"
                         )
                         agent_kwargs.update(
                             {
@@ -721,10 +743,10 @@ class AgentServiceManager:
                             }
                         )
                         logger.info(
-                            f"✅ Text2SQL kwargs prepared: {list(agent_kwargs.keys())}"
+                            f"Text2SQL kwargs prepared: {list(agent_kwargs.keys())}"
                         )
                         logger.info(
-                            f"🔗 Database URL: {config.get('database_url', 'NOT FOUND')}"
+                            f"Database URL: {config.get('database_url', 'NOT FOUND')}"
                         )
 
                     # Unpack tools and tool_config from create_default_tools

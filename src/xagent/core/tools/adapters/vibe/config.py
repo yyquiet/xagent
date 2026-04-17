@@ -41,7 +41,7 @@ class BaseToolConfig(ABC):
         pass
 
     @abstractmethod
-    def get_mcp_server_configs(self) -> List[Dict[str, Any]]:
+    async def get_mcp_server_configs(self) -> List[Dict[str, Any]]:
         """Get MCP server configurations."""
         pass
 
@@ -249,7 +249,7 @@ class ToolConfig(BaseToolConfig):
     def get_tts_models(self) -> Dict[str, Any]:
         return self.tts_models
 
-    def get_mcp_server_configs(self) -> List[Dict[str, Any]]:
+    async def get_mcp_server_configs(self) -> List[Dict[str, Any]]:
         return self.mcp_server_configs
 
     def get_file_tools_enabled(self) -> bool:
