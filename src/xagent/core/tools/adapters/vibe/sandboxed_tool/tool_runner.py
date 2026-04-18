@@ -8,6 +8,7 @@ import base64
 import importlib
 import inspect
 import json
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -111,7 +112,7 @@ def main() -> None:
         init_params = _load_init_params(parsed.init_params_b64)
         tool_args = _load_args(parsed.args_b64)
     except Exception as e:
-        print(f"Sandbox config error: {e}")
+        print(f"Sandbox config error: {e}", file=sys.stderr)
         raise
 
     result = _execute_from_spec(execution_spec, init_params, tool_args)

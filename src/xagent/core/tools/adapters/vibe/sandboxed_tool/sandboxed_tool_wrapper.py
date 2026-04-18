@@ -1,7 +1,7 @@
 """
 Generic sandboxed tool wrapper
 
-Execute tool's run_json_sync/async methods in sandbox environment by uploading the entire xagent library to the sandbox.
+Execute tool's run_json_sync/async methods in sandbox environment.
 """
 
 import asyncio
@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 # Base path where project source code is mounted inside the sandbox
 _SANDBOX_SRC_ROOT = "/app/src"
+# Coupled to the mounted package layout inside the sandbox. Update this path if
+# ``tool_runner.py`` moves.
+_SANDBOX_TOOL_RUNNER_PATH = (
+    f"{_SANDBOX_SRC_ROOT}/xagent/core/tools/adapters/vibe/sandboxed_tool/tool_runner.py"
+)
 
 _SANDBOX_BASE_DEPENDENCIES = [
     "pydantic>=2.0.0",
@@ -317,14 +322,10 @@ class SandboxedToolWrapper(AbstractBaseTool):
         execution_spec_b64 = base64.b64encode(
             execution_spec_json.encode("utf-8")
         ).decode("ascii")
-        runner_path = (
-            f"{_SANDBOX_SRC_ROOT}/xagent/core/tools/adapters/vibe/sandboxed_tool/"
-            "tool_runner.py"
-        )
 
         command = [
             "python",
-            runner_path,
+            _SANDBOX_TOOL_RUNNER_PATH,
             "--execution-spec-b64",
             execution_spec_b64,
             "--args-b64",
