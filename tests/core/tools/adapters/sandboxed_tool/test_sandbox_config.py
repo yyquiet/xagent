@@ -1,10 +1,10 @@
 """Unit tests for sandbox config metadata helpers."""
 
-from typing import Any, Mapping, Type
+from typing import Any
 
-from pydantic import BaseModel, Field
-
-from xagent.core.tools.adapters.vibe.base import AbstractBaseTool
+from tests.core.tools.adapters.sandboxed_tool.conftest import (
+    FakeBaseTool,
+)
 from xagent.core.tools.adapters.vibe.function import FunctionTool
 from xagent.core.tools.adapters.vibe.sandboxed_tool.sandbox_config import (
     extract_bound_method_target,
@@ -14,69 +14,21 @@ from xagent.core.tools.adapters.vibe.sandboxed_tool.sandbox_config import (
 )
 
 
-class _FakeArgs(BaseModel):
-    code: str = Field(default="")
-
-
-class _FakeResult(BaseModel):
-    output: str = Field(default="")
-
-
 @sandbox_config(packages=["sqlalchemy"], env_vars=["DB_URL"])
-class _ConfiguredTool(AbstractBaseTool):
+class _ConfiguredTool(FakeBaseTool):
     """Fake tool with sandbox config metadata."""
 
     @property
     def name(self) -> str:
         return "configured_tool"
 
-    @property
-    def description(self) -> str:
-        return "fake"
 
-    @property
-    def tags(self) -> list[str]:
-        return []
-
-    def args_type(self) -> Type[BaseModel]:
-        return _FakeArgs
-
-    def return_type(self) -> Type[BaseModel]:
-        return _FakeResult
-
-    def run_json_sync(self, args: Mapping[str, Any]) -> Any:
-        return {}
-
-    async def run_json_async(self, args: Mapping[str, Any]) -> Any:
-        return {}
-
-
-class _UnconfiguredTool(AbstractBaseTool):
+class _UnconfiguredTool(FakeBaseTool):
     """Fake tool without sandbox config metadata."""
 
     @property
     def name(self) -> str:
         return "unconfigured_tool"
-
-    @property
-    def description(self) -> str:
-        return "fake"
-
-    @property
-    def tags(self) -> list[str]:
-        return []
-
-    def args_type(self) -> Type[BaseModel]:
-        return _FakeArgs
-
-    def return_type(self) -> Type[BaseModel]:
-        return _FakeResult
-
-    def run_json_sync(self, args: Mapping[str, Any]) -> Any:
-        return {}
-
-    async def run_json_async(self, args: Mapping[str, Any]) -> Any:
-        return {}
 
 
 @sandbox_config(packages=["sqlalchemy"])
@@ -88,32 +40,12 @@ class _PlainOwner:
 
 
 @sandbox_config(enabled=False)
-class _DisabledTool(AbstractBaseTool):
+class _DisabledTool(FakeBaseTool):
     """Fake tool with sandbox explicitly disabled."""
 
     @property
     def name(self) -> str:
         return "disabled_tool"
-
-    @property
-    def description(self) -> str:
-        return "fake"
-
-    @property
-    def tags(self) -> list[str]:
-        return []
-
-    def args_type(self) -> Type[BaseModel]:
-        return _FakeArgs
-
-    def return_type(self) -> Type[BaseModel]:
-        return _FakeResult
-
-    def run_json_sync(self, args: Mapping[str, Any]) -> Any:
-        return {}
-
-    async def run_json_async(self, args: Mapping[str, Any]) -> Any:
-        return {}
 
 
 def _make_bound_method_tool() -> FunctionTool:

@@ -88,7 +88,11 @@ def _validate_spec(spec: dict[str, Any]) -> None:
 def _execute_from_spec(
     spec: dict[str, Any], init_params: dict[str, Any], args: dict[str, Any]
 ) -> Any:
-    """Reconstruct the target object from spec and execute it."""
+    """Reconstruct the target object from spec and execute it.
+
+    Each call creates a fresh instance -- state is not preserved across
+    invocations because the sandbox runner is a separate process.
+    """
     _validate_spec(spec)
 
     tool_class = _load_tool_class(spec["tool_class"])

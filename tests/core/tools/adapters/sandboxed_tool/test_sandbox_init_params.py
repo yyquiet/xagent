@@ -5,13 +5,15 @@ Test init params extraction, serialization, and script generation for sandbox to
 import base64
 import json
 import threading
-from typing import Any, Mapping, Optional, Type
+from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import cloudpickle
 import pytest
-from pydantic import BaseModel, Field
 
+from tests.core.tools.adapters.sandboxed_tool.conftest import (
+    FakeBaseTool,
+)
 from xagent.core.tools.adapters.vibe.base import AbstractBaseTool
 from xagent.core.tools.adapters.vibe.function import FunctionTool
 from xagent.core.tools.adapters.vibe.sandboxed_tool.sandbox_config import (
@@ -26,16 +28,8 @@ from xagent.core.tools.adapters.vibe.sandboxed_tool.sandboxed_tool_wrapper impor
 from xagent.core.workspace import TaskWorkspace
 
 
-class _FakeArgs(BaseModel):
-    code: str = Field(default="")
-
-
-class _FakeResult(BaseModel):
-    output: str = Field(default="")
-
-
 @sandbox_config()
-class _FakeToolWithWorkspace(AbstractBaseTool):
+class _FakeToolWithWorkspace(FakeBaseTool):
     """Fake tool with init params."""
 
     def __init__(self, workspace: Optional[TaskWorkspace] = None) -> None:
@@ -45,29 +39,9 @@ class _FakeToolWithWorkspace(AbstractBaseTool):
     def name(self) -> str:
         return "fake_tool_ws"
 
-    @property
-    def description(self) -> str:
-        return "fake"
-
-    @property
-    def tags(self) -> list[str]:
-        return []
-
-    def args_type(self) -> Type[BaseModel]:
-        return _FakeArgs
-
-    def return_type(self) -> Type[BaseModel]:
-        return _FakeResult
-
-    def run_json_sync(self, args: Mapping[str, Any]) -> Any:
-        return {}
-
-    async def run_json_async(self, args: Mapping[str, Any]) -> Any:
-        return {}
-
 
 @sandbox_config()
-class _FakeToolNoParams(AbstractBaseTool):
+class _FakeToolNoParams(FakeBaseTool):
     """Fake tool with no init params."""
 
     def __init__(self) -> None:
@@ -76,26 +50,6 @@ class _FakeToolNoParams(AbstractBaseTool):
     @property
     def name(self) -> str:
         return "fake_tool_nop"
-
-    @property
-    def description(self) -> str:
-        return "fake"
-
-    @property
-    def tags(self) -> list[str]:
-        return []
-
-    def args_type(self) -> Type[BaseModel]:
-        return _FakeArgs
-
-    def return_type(self) -> Type[BaseModel]:
-        return _FakeResult
-
-    def run_json_sync(self, args: Mapping[str, Any]) -> Any:
-        return {}
-
-    async def run_json_async(self, args: Mapping[str, Any]) -> Any:
-        return {}
 
 
 @sandbox_config()

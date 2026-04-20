@@ -6,13 +6,13 @@ All sandbox interactions are mocked.
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Mapping, Type
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pydantic import BaseModel, Field
 
-from xagent.core.tools.adapters.vibe.base import AbstractBaseTool
+from tests.core.tools.adapters.sandboxed_tool.conftest import (
+    FakeBaseTool,
+)
 from xagent.core.tools.adapters.vibe.sandboxed_tool.sandbox_config import (
     sandbox_config,
 )
@@ -38,41 +38,13 @@ def _make_sandbox(name: str = "sandbox-1") -> MagicMock:
     return sb
 
 
-class _FakeArgs(BaseModel):
-    code: str = Field(default="")
-
-
-class _FakeResult(BaseModel):
-    output: str = Field(default="")
-
-
 @sandbox_config()
-class _DefaultTool(AbstractBaseTool):
+class _DefaultTool(FakeBaseTool):
     """Fake tool with no extra runtime packages."""
 
     @property
     def name(self) -> str:
         return "default_tool"
-
-    @property
-    def description(self) -> str:
-        return "fake"
-
-    @property
-    def tags(self) -> list[str]:
-        return []
-
-    def args_type(self) -> Type[BaseModel]:
-        return _FakeArgs
-
-    def return_type(self) -> Type[BaseModel]:
-        return _FakeResult
-
-    def run_json_sync(self, args: Mapping[str, Any]) -> Any:
-        return {}
-
-    async def run_json_async(self, args: Mapping[str, Any]) -> Any:
-        return {}
 
 
 @pytest.fixture(autouse=True)
