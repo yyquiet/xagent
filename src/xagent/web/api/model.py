@@ -1,5 +1,6 @@
 """Model management API route handlers"""
 
+import asyncio
 import logging
 import time
 import urllib.parse
@@ -22,6 +23,7 @@ from ..models.database import get_db
 from ..models.model import Model as DBModel
 from ..models.user import User, UserDefaultModel, UserModel
 from ..schemas.model import (
+    ModelConnectionTestRequest,
     ModelCreate,
     ModelTestRequest,
     ModelTestResponse,
@@ -93,6 +95,83 @@ def _serialize_model_with_access(
     }
 
 
+def _normalize_provider_model_id(model_id: str) -> str:
+    """Normalize provider model IDs for matching."""
+
+    normalized = model_id.strip()
+    if normalized.startswith("models/"):
+        return normalized[7:]
+    return normalized
+
+
+def _find_provider_model(
+    models: List[dict[str, Any]], target_model_name: str
+) -> Optional[dict[str, Any]]:
+    """Find a provider model entry by ID after normalizing provider-specific prefixes."""
+
+    normalized_target = _normalize_provider_model_id(target_model_name)
+    for model in models:
+        model_id = str(model.get("id", "")).strip()
+        if _normalize_provider_model_id(model_id) == normalized_target:
+            return model
+    return None
+
+
+def _validate_requested_abilities(
+    requested_abilities: Optional[List[str]], provider_model: Optional[dict[str, Any]]
+) -> None:
+    """Validate that the fetched provider model supports the requested abilities."""
+
+    if not requested_abilities or not provider_model:
+        return
+
+    available_abilities = provider_model.get("abilities") or provider_model.get(
+        "model_ability"
+    )
+    if not available_abilities:
+        return
+
+    available = {str(ability) for ability in available_abilities}
+    missing = sorted(set(requested_abilities) - available)
+    if missing:
+        raise ValueError(
+            f"Model '{provider_model.get('id', '')}' does not support abilities: {', '.join(missing)}"
+        )
+
+
+async def _validate_provider_model_listing(
+    provider: str,
+    model_name: str,
+    api_key: Optional[str],
+    base_url: Optional[str],
+    requested_abilities: Optional[List[str]] = None,
+) -> None:
+    """Validate provider connectivity by fetching the provider model list."""
+
+    import asyncio
+
+    from ..services.model_list_service import (
+        PROVIDER_FETCHERS,
+        fetch_models_from_provider,
+    )
+
+    provider_id = provider.lower().strip()
+    if provider_id not in PROVIDER_FETCHERS:
+        raise ValueError(
+            f"Connection test is not supported for provider '{provider}' in this category yet"
+        )
+
+    models = await asyncio.wait_for(
+        fetch_models_from_provider(provider, api_key or "", base_url),
+        timeout=10.0,
+    )
+    provider_model = _find_provider_model(models, model_name)
+    if provider_model is None:
+        raise ValueError(f"Model '{model_name}' was not found in provider '{provider}'")
+
+    _validate_requested_abilities(requested_abilities, provider_model)
+
+
 def _is_default_config_type_compatible(model: Any, config_type: str) -> bool:
     category_by_config_type = {
         "general": "llm",
@@ -151,7 +230,7 @@ async def create_model(
             model_name=model.model_name,
             model_provider=model.model_provider,
             base_url=base_url,
-            api_key=model.api_key,
+            api_key=model.api_key or "",
             default_temperature=model.temperature,
             timeout=180.0,
             abilities=model.abilities,
@@ -163,7 +242,7 @@ async def create_model(
             model_name=model.model_name,
             model_provider=model.model_provider,
             base_url=base_url,
-            api_key=model.api_key,
+            api_key=model.api_key or "",
             timeout=180.0,
             abilities=model.abilities,
             description=model.description,
@@ -175,7 +254,7 @@ async def create_model(
             model_name=model.model_name,
             model_provider=model.model_provider,
             base_url=base_url,
-            api_key=model.api_key,
+            api_key=model.api_key or "",
             default_temperature=model.temperature,
             timeout=180.0,
             abilities=model.abilities,
@@ -189,7 +268,7 @@ async def create_model(
             model_name=model.model_name,
             model_provider=model.model_provider,
             base_url=base_url,
-            api_key=model.api_key,
+            api_key=model.api_key or "",
             timeout=180.0,
             abilities=model.abilities,
             description=model.description,
@@ -576,7 +655,8 @@ async def update_model(
     # Update model configuration in-place
     update_data = model_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
-        # Don't update api_key with empty string
+        # Don't update api_key with empty string unless explicitly needed, but allow setting to empty if intended
+        # We will keep the previous behavior: skip empty strings for api_key updates to prevent accidental wiping.
         if field == "api_key" and value == "":
             continue
         # Skip share_with_users as it's handled separately
@@ -629,6 +709,168 @@ async def delete_model(
     model_storage.delete(user_model.model.model_id)
 
     return {"message": "Model deleted successfully"}
+
+
+@model_router.post("/test-connection", response_model=ModelTestResponse)
+async def test_model_connection(
+    request: ModelConnectionTestRequest,
+    user: User = Depends(get_current_user),
+) -> ModelTestResponse:
+    """Test connection with provided model parameters before saving."""
+    from xagent.core.model.chat.basic.adapter import create_base_llm
+    from xagent.core.model.embedding.adapter import create_embedding_adapter
+    from xagent.core.model.image.adapter import create_image_model
+    from xagent.core.model.xinference_base import BaseXinferenceModel
+
+    start_time = time.time()
+    timeout_seconds = 10.0
+    try:
+        from xagent.core.model.providers import default_base_url_for_provider
+
+        base_url = request.base_url or default_base_url_for_provider(
+            request.model_provider
+        )
+
+        if request.category == "llm":
+            # For some reasoning models (like o1, o3, claude reasoning variants), temperature might be deprecated
+            # and max_tokens might be replaced by max_completion_tokens. We use a more minimal test strategy here.
+            model_name_lower = request.model_name.lower()
+            is_reasoning_model = (
+                model_name_lower.startswith(("o1", "o3"))
+                or "-o1" in model_name_lower
+                or "-o3" in model_name_lower
+                or "thinking" in model_name_lower
+                or "reasoner" in model_name_lower
+            )
+
+            config_kwargs: dict[str, Any] = {
+                "id": "test-model",
+                "model_provider": request.model_provider,
+                "model_name": request.model_name,
+                "api_key": request.api_key,
+                "base_url": base_url,
+            }
+
+            # Add temperature only if it's not a known reasoning model that rejects it
+            if not is_reasoning_model:
+                config_kwargs["default_temperature"] = request.temperature or 0.7
+
+            config = ChatModelConfig(**config_kwargs)
+            llm = create_base_llm(config)
+
+            # Test chat connection with minimal tokens
+            chat_kwargs: dict[str, Any] = {"max_tokens": 1}
+
+            # Claude models and OpenAI o1/o3 handle max_tokens differently or deprecate temperature
+            if is_reasoning_model:
+                chat_kwargs = {}  # let the adapter handle defaults
+
+            await asyncio.wait_for(
+                llm.chat([{"role": "user", "content": "Hello"}], **chat_kwargs),
+                timeout=timeout_seconds,
+            )
+
+        elif request.category == "embedding":
+            embedding_config = EmbeddingModelConfig(
+                id="test-model",
+                model_provider=request.model_provider,
+                model_name=request.model_name,
+                api_key=request.api_key,
+                base_url=base_url,
+                dimension=request.dimension or 1536,
+                abilities=request.abilities or ["embedding"],
+            )
+            embedding_model = create_embedding_adapter(embedding_config)
+            await asyncio.wait_for(
+                asyncio.to_thread(embedding_model.encode, "hello"),
+                timeout=timeout_seconds,
+            )
+
+        elif request.category == "image":
+            image_config = ImageModelConfig(
+                id="test-model",
+                model_provider=request.model_provider,
+                model_name=request.model_name,
+                api_key=request.api_key,
+                base_url=base_url,
+                abilities=request.abilities or ["generate"],
+            )
+            create_image_model(image_config)
+            await asyncio.wait_for(
+                _validate_provider_model_listing(
+                    provider=request.model_provider,
+                    model_name=request.model_name,
+                    api_key=request.api_key,
+                    base_url=base_url,
+                    requested_abilities=request.abilities,
+                ),
+                timeout=timeout_seconds,
+            )
+
+        elif request.category == "speech":
+            if request.model_provider.lower().strip() != "xinference":
+                raise ValueError(
+                    f"Unsupported speech provider for testing: {request.model_provider}"
+                )
+
+            requested_abilities = request.abilities or ["asr"]
+            await asyncio.wait_for(
+                _validate_provider_model_listing(
+                    provider=request.model_provider,
+                    model_name=request.model_name,
+                    api_key=request.api_key,
+                    base_url=base_url,
+                    requested_abilities=requested_abilities,
+                ),
+                timeout=timeout_seconds,
+            )
+
+            probe_model = BaseXinferenceModel(
+                model=request.model_name,
+                model_uid=request.model_name,
+                base_url=base_url,
+                api_key=request.api_key or None,
+            )
+            try:
+                await asyncio.wait_for(
+                    probe_model._ensure_model_handle(), timeout=timeout_seconds
+                )
+            finally:
+                await probe_model.aclose()
+
+        else:
+            raise ValueError(f"Unsupported category for testing: {request.category}")
+
+        response_time = time.time() - start_time
+        return ModelTestResponse(
+            model_id=request.model_name,
+            status="passed",
+            response_time=response_time,
+            message="Connection successful",
+            error=None,
+        )
+
+    except asyncio.TimeoutError:
+        logger.error(f"Model connection test timed out for {request.model_name}")
+        response_time = time.time() - start_time
+        return ModelTestResponse(
+            model_id=request.model_name,
+            status="failed",
+            response_time=response_time,
+            message="Connection timed out",
+            error=f"Connection timed out after {int(timeout_seconds)} seconds. Please check your network connection and provider status.",
+        )
+    except Exception as e:
+        logger.error(f"Model connection test failed: {e}")
+        response_time = time.time() - start_time
+        safe_error = redact_sensitive_text(str(e))
+        return ModelTestResponse(
+            model_id=request.model_name,
+            status="failed",
+            response_time=response_time,
+            message="Connection failed",
+            error=safe_error,
+        )
 
 
 @model_router.post("/test", response_model=List[ModelTestResponse])

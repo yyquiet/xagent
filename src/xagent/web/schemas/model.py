@@ -68,7 +68,7 @@ class ModelCreate(BaseModel):
     category: str = "llm"
     model_provider: str
     model_name: str
-    api_key: str
+    api_key: Optional[str] = None
     base_url: Optional[str] = None
     temperature: Optional[float] = None
     dimension: Optional[int] = None
@@ -194,6 +194,19 @@ class ModelTestResponse(BaseModel):
     response_time: Optional[float]
     message: Optional[str]
     error: Optional[str]
+
+
+class ModelConnectionTestRequest(BaseModel):
+    """Request schema for testing an unsaved model connection"""
+
+    model_provider: str
+    model_name: str
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    category: str = "llm"
+    temperature: Optional[float] = None
+    dimension: Optional[int] = None
+    abilities: Optional[List[str]] = None
 
 
 class UserDefaultModelCreate(BaseModel):
