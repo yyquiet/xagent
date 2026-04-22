@@ -36,6 +36,14 @@ from .ws_trace_handlers import WebSocketTraceHandler
 
 logger = logging.getLogger(__name__)
 
+# Execution mode to pattern mapping
+# flash -> single_call, balanced -> react, think -> dag_plan_execute
+EXECUTION_MODE_TO_PATTERN = {
+    "flash": "single_call",
+    "balanced": "react",
+    "think": "dag_plan_execute",
+}
+
 # Create router
 chat_router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -501,7 +509,9 @@ class AgentServiceManager:
             # Get LLM configuration from task database record
             logger.info(f"Loading LLM configuration for task {task_id} from database")
             agent_config = None  # Initialize agent_config to use later
-            use_dag = True  # Default to DAG pattern
+            # Default to react pattern if not specified
+            task_pattern = "react"  # Default pattern
+            use_dag = True  # Default to DAG pattern (for backward compatibility)
             try:
                 if db is None:
                     raise ValueError("Database session is required")
@@ -531,6 +541,17 @@ class AgentServiceManager:
                         logger.info(
                             f"❌ Task {task.id} is not Text2SQL, using standard agent creation"
                         )
+
+                    # Get task's execution_mode and map to pattern
+                    task_execution_mode = (
+                        getattr(task, "execution_mode", None) or "balanced"
+                    )
+                    task_pattern = EXECUTION_MODE_TO_PATTERN.get(
+                        task_execution_mode, "react"
+                    )
+                    logger.info(
+                        f"Task {task_id} execution_mode={task_execution_mode} -> pattern={task_pattern}"
+                    )
 
                     llm_ids = self._get_task_llm_ids(task, db)
                     logger.info(
@@ -562,9 +583,16 @@ class AgentServiceManager:
                                 task_vision_llm,
                                 task_compact_llm,
                             ) = agent_config["llms"]
-                            use_dag = agent_config["execution_mode"] == "graph"
+                            # Agent Builder execution_mode overrides task pattern
+                            # "flash" -> single_call, "balanced" -> react, "think" -> dag_plan_execute
+                            agent_execution_mode = agent_config.get(
+                                "execution_mode", "balanced"
+                            )
+                            task_pattern = EXECUTION_MODE_TO_PATTERN.get(
+                                agent_execution_mode, "react"
+                            )
                             logger.info(
-                                f"Task {task_id} using execution mode: {agent.execution_mode}"
+                                f"Task {task_id} using Agent Builder execution mode: {agent.execution_mode} -> pattern={task_pattern}"
                             )
 
                     # If no models were resolved, use defaults
@@ -794,7 +822,7 @@ class AgentServiceManager:
                         tools=tools_list,
                         tool_config=tool_config,  # Pass tool_config for proper multi-tenancy
                         memory=get_memory_store(),  # Use dynamic memory store for auto-switching
-                        use_dag_pattern=use_dag,
+                        pattern=task_pattern,  # Use pattern instead of use_dag_pattern
                         tracer=tracer,
                         agent_type=str(task.agent_type)
                         if task and task.agent_type
@@ -1094,7 +1122,7 @@ class AgentServiceManager:
                     tracer=tracer,
                     enable_workspace=True,
                     task_id=str(task.id),
-                    use_dag_pattern=False,  # Text2SQL agent provides its own patterns
+                    pattern="react",  # Text2SQL agent provides its own patterns
                     # Pass Text2SQL-specific configuration
                     database_url=database_url,
                     database_name=database_name,
@@ -1288,7 +1316,6 @@ class AgentServiceManager:
                     task_fast_llm = None
                     task_vision_llm = None
                     task_compact_llm = None
-                use_dag = task_llm is not None
 
                 # Build allowed external directories
                 allowed_external_dirs = []
@@ -1313,7 +1340,7 @@ class AgentServiceManager:
                             if db is None
                             else [],  # Tools loaded separately for reconstructed agents
                             memory=get_memory_store(),  # Use dynamic memory store for auto-switching
-                            use_dag_pattern=use_dag,
+                            pattern="react",  # Default to react for reconstructed agents
                             tracer=tracer,
                             enable_workspace=True,
                             workspace_base_dir=str(
@@ -1645,7 +1672,8 @@ async def create_task(
             visual_model_name=visual_model_name,
             compact_model_name=compact_model_name,
             agent_config=task_agent_config or None,
-            vibe_mode=request.vibe_mode or "task",
+            execution_mode=request.execution_mode
+            or "balanced",  # Default to balanced mode
             process_description=request.process_description,
             examples=examples_data,
             agent_id=request.agent_id,  # Set agent_id if provided
@@ -1684,7 +1712,7 @@ async def create_task(
             small_fast_model_name=task.small_fast_model_name,
             visual_model_name=task.visual_model_name,
             compact_model_name=task.compact_model_name,
-            vibe_mode=task.vibe_mode,
+            execution_mode=task.execution_mode,
             channel_id=task.channel_id,
             channel_name=task.channel_name,
         )
@@ -1701,8 +1729,8 @@ async def get_tasks(
     search: Optional[str] = None,
     agent_type: Optional[str] = None,
     exclude_agent_type: Optional[str] = None,
-    vibe_mode: Optional[str] = None,
-    exclude_vibe_mode: Optional[str] = None,
+    execution_mode: Optional[str] = None,
+    exclude_execution_mode: Optional[str] = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
@@ -1762,11 +1790,11 @@ async def get_tasks(
                     # Invalid agent type, ignore filter
                     pass
 
-            # Apply vibe mode filter if provided
-            if vibe_mode:
-                query = query.filter(Task.vibe_mode == vibe_mode)
-            elif exclude_vibe_mode:
-                query = query.filter(Task.vibe_mode != exclude_vibe_mode)
+            # Apply execution mode filter if provided
+            if execution_mode:
+                query = query.filter(Task.execution_mode == execution_mode)
+            elif exclude_execution_mode:
+                query = query.filter(Task.execution_mode != exclude_execution_mode)
 
             # Get total count
             total = query.count()
@@ -1811,7 +1839,7 @@ async def get_tasks(
                         "model_name": task.model_name,
                         "small_fast_model_name": task.small_fast_model_name,
                         "visual_model_name": task.visual_model_name,
-                        "vibe_mode": task.vibe_mode,
+                        "execution_mode": task.execution_mode,
                         "input_tokens": task.input_tokens or 0,
                         "output_tokens": task.output_tokens or 0,
                         "total_tokens": task.total_tokens or 0,
