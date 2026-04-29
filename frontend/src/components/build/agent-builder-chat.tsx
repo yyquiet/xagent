@@ -140,7 +140,7 @@ export function AgentBuilderChat({ agentConfig, onUpdateConfig, availableOptions
           }
         }
 
-        finalMessage += `\n\n[System Note: The user has uploaded ${files.length} file(s). I have automatically created a knowledge base named "${collectionName}" with these files. You MUST NOT use list_knowledge_bases to check it, just ASSUME it exists. If the agent does not exist yet (no agent ID), use create_agent to build it and include "${collectionName}" in the knowledge_bases list. If it exists, use update_agent.]`;
+        finalMessage += `\n\n[System Note: The user has uploaded ${files.length} file(s). I have automatically created a knowledge base named "${collectionName}" with these files. You MUST NOT use list_knowledge_bases to check it, just ASSUME it exists. If the agent does not exist yet (no agent ID), use create_agent to build it and include "${collectionName}" in the knowledge_bases list. If it exists, use update_agent. CRITICAL REMINDER: CONTINUE building the agent based on the user's ORIGINAL requirements (name, role, etc.) to prevent forgetting the initial context. Do not generate generic names like "FAQ Bot" or "Data Q&A Agent".]`;
       } catch (err) {
         console.error("Failed to upload files to KB", err);
         toast.error("Failed to upload files to create knowledge base");
@@ -151,7 +151,7 @@ export function AgentBuilderChat({ agentConfig, onUpdateConfig, availableOptions
     } else if (metadata?.url) {
       // Extract the URL from the structured metadata instead of matching raw text
       const url = metadata.url;
-      finalMessage += `\n\n[System Note: The user has provided the website URL: ${url}. Please IMMEDIATELY use the \`create_knowledge_base_from_url\` tool to ingest it, then create/update the agent with the new knowledge base. Do not ask for the URL again.]`;
+      finalMessage += `\n\n[System Note: The user has provided the website URL: ${url}. Please IMMEDIATELY use the \`create_knowledge_base_from_url\` tool to ingest it, then create/update the agent with the new knowledge base. Do not ask for the URL again. CRITICAL REMINDER: CONTINUE building the agent based on the user's ORIGINAL requirements (name, role, etc.) to prevent forgetting the initial context. Do not generate generic names like "FAQ Bot" or "Data Q&A Agent".]`;
     }
 
     const sendPayload = (ws: WebSocket) => {
@@ -212,27 +212,35 @@ export function AgentBuilderChat({ agentConfig, onUpdateConfig, availableOptions
                   let displayReply = currentReply.replace(/```json[\s\S]*?(```|$)/gi, "").trim()
                   let interactions = undefined;
 
-                  // Check if currentReply is directly a JSON object
-                  try {
-                    const parsed = JSON.parse(currentReply);
-                    if (parsed.type === 'chat' && parsed.chat?.interactions) {
-                      displayReply = parsed.chat.message || "";
-                      interactions = parsed.chat.interactions;
+                  // First check if data has structured chat_response (new backend format)
+                  if (data.data?.chat_response?.interactions) {
+                    interactions = data.data.chat_response.interactions;
+                    if (data.data.chat_response.message) {
+                      displayReply = data.data.chat_response.message;
                     }
-                  } catch (e) {
-                    // Check if there is a JSON block for clarification form
-                    const jsonMatch = currentReply.match(/```json\s*([\s\S]*?)\s*```/);
-                    if (jsonMatch) {
-                      try {
-                        const parsed = JSON.parse(jsonMatch[1]);
-                        if (parsed.type === 'chat' && parsed.chat?.interactions) {
-                          interactions = parsed.chat.interactions;
-                          if (parsed.chat.message && !displayReply) {
-                            displayReply = parsed.chat.message;
+                  } else {
+                    // Fallback to checking if currentReply is directly a JSON object
+                    try {
+                      const parsed = JSON.parse(currentReply);
+                      if (parsed.type === 'chat' && parsed.chat?.interactions) {
+                        displayReply = parsed.chat.message || "";
+                        interactions = parsed.chat.interactions;
+                      }
+                    } catch (e) {
+                      // Check if there is a JSON block for clarification form
+                      const jsonMatch = currentReply.match(/```json\s*([\s\S]*?)\s*```/);
+                      if (jsonMatch) {
+                        try {
+                          const parsed = JSON.parse(jsonMatch[1]);
+                          if (parsed.type === 'chat' && parsed.chat?.interactions) {
+                            interactions = parsed.chat.interactions;
+                            if (parsed.chat.message && !displayReply) {
+                              displayReply = parsed.chat.message;
+                            }
                           }
+                        } catch (e) {
+                          // ignore parse errors
                         }
-                      } catch (e) {
-                        // ignore parse errors
                       }
                     }
                   }
@@ -299,31 +307,42 @@ export function AgentBuilderChat({ agentConfig, onUpdateConfig, availableOptions
               // The backend no longer sends config_updates in task_completed.
               // We handle it in tool_execution_end.
 
-              const finalContent = data.result || currentReply;
-              let cleanReply = finalContent.replace(/```json[\s\S]*?(```|$)/gi, "").trim()
+              let finalContent = typeof data.result === 'object' ? data.result.content : data.result;
+              finalContent = finalContent || currentReply;
+
+              let cleanReply = typeof finalContent === 'string' ? finalContent.replace(/```json[\s\S]*?(```|$)/gi, "").trim() : "";
               let interactions = undefined;
 
-              // Check if finalContent is directly a JSON object
-              try {
-                const parsed = JSON.parse(finalContent);
-                if (parsed.type === 'chat' && parsed.chat?.interactions) {
-                  cleanReply = parsed.chat.message || "";
-                  interactions = parsed.chat.interactions;
+              // Check if we have chat_response structure
+              if (typeof data.result === 'object' && data.result.chat_response) {
+                interactions = data.result.chat_response.interactions;
+                if (data.result.chat_response.message) {
+                  cleanReply = data.result.chat_response.message;
                 }
-              } catch (e) {
-                // If it's not direct JSON, check for markdown JSON blocks
-                const jsonMatch = finalContent.match(/```json\s*([\s\S]*?)\s*```/);
-                if (jsonMatch) {
-                  try {
-                    const parsed = JSON.parse(jsonMatch[1]);
-                    if (parsed.type === 'chat' && parsed.chat?.interactions) {
-                      interactions = parsed.chat.interactions;
-                      if (parsed.chat.message && !cleanReply) {
-                        cleanReply = parsed.chat.message;
+              }
+
+              // Fallback to checking finalContent if interactions is still undefined
+              if (!interactions && typeof finalContent === 'string') {
+                try {
+                  const parsed = JSON.parse(finalContent);
+                  if (parsed.type === 'chat' && parsed.chat?.interactions) {
+                    cleanReply = parsed.chat.message || cleanReply;
+                    interactions = parsed.chat.interactions;
+                  }
+                } catch (e) {
+                  const jsonMatch = finalContent.match(/```json\s*([\s\S]*?)\s*```/);
+                  if (jsonMatch) {
+                    try {
+                      const parsed = JSON.parse(jsonMatch[1]);
+                      if (parsed.type === 'chat' && parsed.chat?.interactions) {
+                        interactions = parsed.chat.interactions;
+                        if (parsed.chat.message && !cleanReply) {
+                          cleanReply = parsed.chat.message;
+                        }
                       }
+                    } catch (e) {
+                      // ignore
                     }
-                  } catch (e) {
-                    // ignore parse errors
                   }
                 }
               }
