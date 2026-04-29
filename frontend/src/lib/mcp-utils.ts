@@ -13,18 +13,18 @@ export function buildCustomApiPayload(
 ): { isValid: boolean; payload?: any; errorKey?: string } {
     const validEnv = customApiEnv.filter(env => env.key.trim() && env.value.trim());
 
-    if (validEnv.length === 0) {
-        return { isValid: false, errorKey: 'tools.mcp.alerts.atLeastOneSecret' };
-    }
+    // Allow empty env for Custom APIs that don't need authentication
+    const envObj: Record<string, string> | null = validEnv.length > 0 ? {} : null;
 
-    const envObj: Record<string, string> = {};
-    validEnv.forEach(env => {
-        envObj[env.key.trim()] = env.value.trim();
-    });
+    if (envObj) {
+        validEnv.forEach(env => {
+            envObj[env.key.trim()] = env.value.trim();
+        });
+    }
 
     // Custom API payload structure expects env at top level, no config/transport
     const payload = { ...mcpFormData };
-    payload.env = envObj;
+    payload.env = envObj || {}; // Send empty object to clear env
     delete payload.config;
     delete payload.transport;
 

@@ -38,7 +38,7 @@ import { getApiUrl } from "@/lib/utils"
 import { apiRequest } from "@/lib/api-wrapper"
 import { ConnectMcpDialog, AppIntegration } from "@/components/mcp/connect-mcp-dialog"
 import { OfficialMcpSettingsDialog } from "@/components/mcp/official-mcp-settings-dialog"
-import { CustomApiForm } from "@/components/mcp/custom-api-form"
+import { CustomApiForm, MCPServerFormData } from "@/components/mcp/custom-api-form"
 import { CustomMcpForm } from "@/components/mcp/custom-mcp-form"
 import { useI18n } from "@/contexts/i18n-context"
 import { useAuth } from "@/contexts/auth-context"
@@ -90,13 +90,6 @@ interface TransportConfig {
     placeholder?: string
     options?: Array<{ value: string; label: string }>
   }>
-}
-
-interface MCPServerFormData {
-  name: string
-  transport: string
-  description: string
-  config: Record<string, any>
 }
 
 interface ConfigurableToolField {
@@ -166,7 +159,10 @@ export default function ToolsPage() {
     name: "",
     transport: "stdio",
     description: "",
-    config: {}
+    config: {},
+    url: "",
+    method: "GET",
+    headers: {}
   })
 
   const { t } = useI18n()
@@ -943,6 +939,7 @@ export default function ToolsPage() {
                 {mcpFormData.transport === 'custom_api' ? (
                   <>
                     <CustomApiForm
+                      key={editingServer?.id || 'new'}
                       mcpFormData={mcpFormData}
                       setMcpFormData={setMcpFormData}
                       customApiEnv={customApiEnv}
@@ -950,9 +947,16 @@ export default function ToolsPage() {
                       originalEnvObj={(() => {
                         let originalEnvObj: Record<string, any> = {};
                         if (editingServer?.config?.env) {
-                          originalEnvObj = typeof editingServer.config.env === 'string'
-                            ? JSON.parse(editingServer.config.env)
-                            : editingServer.config.env;
+                          if (typeof editingServer.config.env === 'string') {
+                            try {
+                              originalEnvObj = JSON.parse(editingServer.config.env);
+                            } catch (e) {
+                              console.error("Failed to parse env:", e);
+                              originalEnvObj = {};
+                            }
+                          } else {
+                            originalEnvObj = editingServer.config.env;
+                          }
                         }
                         return originalEnvObj;
                       })()}
@@ -976,11 +980,8 @@ export default function ToolsPage() {
                   onClick={handleSaveMcpServer}
                   disabled={
                     isLoading ||
-                    (mcpFormData.transport === 'custom_api' && (
-                      !mcpFormData.name.trim() ||
-                      customApiEnv.length === 0 ||
-                      customApiEnv.some(env => !env.key.trim() || !env.value.trim())
-                    ))
+                    !mcpFormData.name.trim() ||
+                    (mcpFormData.transport === 'custom_api' && customApiEnv.length > 0 && customApiEnv.some(env => !env.key.trim() || !env.value.trim()))
                   }
                 >
                   {isLoading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
@@ -1319,14 +1320,10 @@ export default function ToolsPage() {
           if (app.is_custom && app.server) {
             setIsOfficialAppDialogOpen(false);
             setEditingServer(app.server);
-            setMcpFormData({
-              name: app.server.name,
-              transport: app.server.transport,
-              description: app.server.description || "",
-              config: app.server.config || {}
-            });
+
             if (app.server.transport === "custom_api") {
-              const envObj = app.server.config?.env || {};
+              const configObj = app.server.config || {};
+              const envObj = configObj.env || {};
               const envList = typeof envObj === 'object' && !Array.isArray(envObj)
                 ? Object.entries(envObj).map(([k, v]) => ({ key: k, value: v as string }))
                 : [];
@@ -1334,6 +1331,23 @@ export default function ToolsPage() {
                 envList.push({ key: "", value: "" });
               }
               setCustomApiEnv(envList);
+
+              setMcpFormData({
+                name: app.server.name,
+                transport: "custom_api",
+                description: app.server.description || "",
+                url: configObj.url || "",
+                method: configObj.method || "GET",
+                headers: configObj.headers || {},
+                config: configObj
+              });
+            } else {
+              setMcpFormData({
+                name: app.server.name,
+                transport: app.server.transport,
+                description: app.server.description || "",
+                config: app.server.config || {}
+              });
             }
             setIsMcpDialogOpen(true);
           }

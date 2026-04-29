@@ -59,7 +59,7 @@ export interface AppIntegration {
 }
 
 import { OfficialMcpSettingsDialog } from "./official-mcp-settings-dialog"
-import { CustomApiForm } from "./custom-api-form"
+import { CustomApiForm, MCPServerFormData } from "./custom-api-form"
 import { CustomMcpForm } from "./custom-mcp-form"
 
 interface ConnectMcpDialogProps {
@@ -103,7 +103,7 @@ export function ConnectMcpDialog({
   const [isSavingCustom, setIsSavingCustom] = useState(false)
   const [customApiEnv, setCustomApiEnv] = useState<{ key: string, value: string }[]>([{ key: "", value: "" }])
   const [transports, setTransports] = useState<any[]>([])
-  const [mcpFormData, setMcpFormData] = useState({
+  const [mcpFormData, setMcpFormData] = useState<MCPServerFormData>({
     name: "",
     transport: "stdio",
     description: "",
@@ -673,6 +673,7 @@ export function ConnectMcpDialog({
 
               <div className="space-y-4">
                 <CustomApiForm
+                  key={editingCustomServerId || 'new'}
                   mcpFormData={mcpFormData}
                   setMcpFormData={setMcpFormData}
                   customApiEnv={customApiEnv}
@@ -694,7 +695,7 @@ export function ConnectMcpDialog({
                   disabled={
                     isSavingCustom ||
                     !mcpFormData.name.trim() ||
-                    !customApiEnv.some(env => env.key.trim() && env.value.trim())
+                    (customApiEnv.length > 0 && customApiEnv.some(env => !env.key.trim() || !env.value.trim()))
                   }
                 >
                   {isSavingCustom && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
@@ -813,12 +814,31 @@ export function ConnectMcpDialog({
               config: appToConfigure.server.config || {}
             });
             if (appToConfigure.server.transport === "custom_api") {
-              const envObj = appToConfigure.server.config?.env || {};
+              const configObj = appToConfigure.server.config || {};
+              const envObj = configObj.env || {};
               const envList = Object.entries(envObj).map(([k, v]) => ({ key: k, value: v as string }));
               if (envList.length === 0) {
                 envList.push({ key: "", value: "" });
               }
               setCustomApiEnv(envList);
+
+              // Map url, method, headers to top level for form component since custom-api-form expects them there
+              setMcpFormData({
+                name: appToConfigure.server.name,
+                transport: "custom_api",
+                description: appToConfigure.server.description || "",
+                url: configObj.url || "",
+                method: configObj.method || "GET",
+                headers: configObj.headers || {},
+                config: configObj
+              });
+            } else {
+              setMcpFormData({
+                name: appToConfigure.server.name,
+                transport: appToConfigure.server.transport,
+                description: appToConfigure.server.description || "",
+                config: appToConfigure.server.config || {}
+              });
             }
             setActiveTab(appToConfigure.server.transport === "custom_api" ? "custom_api" : "custom");
           }
