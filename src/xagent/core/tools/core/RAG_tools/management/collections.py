@@ -45,6 +45,7 @@ from ..storage.factory import get_metadata_store, get_vector_index_store
 from ..utils.lancedb_query_utils import _safe_count_rows
 from ..utils.string_utils import build_lancedb_filter_expression, escape_lancedb_string
 from ..utils.user_permissions import UserPermissions
+from ..utils.user_scope import resolve_user_scope
 from ..version_management.cascade_cleaner import cleanup_document_cascade
 
 logger = logging.getLogger(__name__)
@@ -506,7 +507,9 @@ async def _load_collection_ingestion_configs(
 
 
 async def list_collections(
-    user_id: Optional[int] = None, is_admin: bool = False, force_realtime: bool = False
+    user_id: Optional[int] = None,
+    is_admin: Optional[bool] = None,
+    force_realtime: bool = False,
 ) -> ListCollectionsResult:
     """List all knowledge base collections along with aggregated statistics.
 
@@ -515,12 +518,16 @@ async def list_collections(
 
     Args:
         user_id: Optional user ID for filtering (for multi-tenancy).
-        is_admin: Whether user has admin privileges.
+        is_admin: Whether user has admin privileges (None to fallback to context).
 
     Returns:
         Aggregated collection metadata and status information for each
         knowledge base, including total documents, parses, chunks, and embeddings.
     """
+
+    scope = resolve_user_scope(user_id=user_id, is_admin=is_admin)
+    user_id = scope.user_id
+    is_admin = scope.is_admin
 
     logger.info("Listing LanceDB collections")
 

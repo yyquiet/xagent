@@ -7,6 +7,7 @@ import asyncio
 import concurrent.futures
 import logging
 import tempfile
+from contextvars import copy_context
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional, TypedDict
@@ -21,6 +22,7 @@ from ..core.schemas import (
 from ..progress import get_progress_manager
 from ..utils.config_utils import coerce_ingestion_config
 from ..utils.string_utils import sanitize_for_doc_id
+from ..utils.user_scope import resolve_user_scope
 from ..web_crawler import WebCrawler
 from .document_ingestion import run_document_ingestion
 
@@ -46,7 +48,7 @@ async def run_web_ingestion(
     ingestion_config: Optional[IngestionConfig] = None,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
     user_id: Optional[int] = None,
-    is_admin: bool = False,
+    is_admin: Optional[bool] = None,
     file_handler: Optional[Callable[[Path, str, str, str], FileHandlerResult]] = None,
 ) -> WebIngestionResult:
     """Crawl a website and ingest all pages into the knowledge base.
@@ -64,7 +66,7 @@ async def run_web_ingestion(
         progress_callback: Optional callback for progress updates
             Args: (message, completed, total)
         user_id: Optional user ID for ownership tracking
-        is_admin: Whether the user has admin privileges
+        is_admin: Optional admin override; when omitted, falls back to request scope
         file_handler: Optional callback to handle file persistence and UploadedFile
             record creation. Signature: (temp_file_path, title, collection, url)
             Returns FileHandlerResult with file_path and optional file_id.
@@ -77,6 +79,10 @@ async def run_web_ingestion(
         ValueError: If configuration is invalid
         RuntimeError: If ingestion fails critically
     """
+    scope = resolve_user_scope(user_id=user_id, is_admin=is_admin)
+    user_id = scope.user_id
+    is_admin = scope.is_admin
+
     start_time = datetime.now(timezone.utc)
     warnings: list[str] = []
     failed_urls: dict[str, str] = {}
@@ -137,6 +143,12 @@ async def run_web_ingestion(
         documents_created = 0
         total_chunks = 0
         total_embeddings = 0
+
+        # Copy context once before the loop to avoid repeated ContextVar copying.
+        # The request-scoped user context remains constant throughout the request.
+        # NOTE: This copies ALL ContextVars (tracing IDs, request IDs, etc.).
+        loop = asyncio.get_event_loop()
+        request_context = copy_context()
 
         for i, crawl_result in enumerate(crawl_results):
             if crawl_result.status != "success":
@@ -212,11 +224,14 @@ async def run_web_ingestion(
                             is_admin=is_admin,
                         )
 
-                    # Run ingestion in thread pool to avoid event loop conflicts
-                    loop = asyncio.get_event_loop()
+                    # Run ingestion in thread pool while preserving ContextVar user scope
+                    # NOTE: request_context was copied before the loop to avoid repeated copying.
+                    # Modifications made in the thread pool won't propagate back to the main request context.
+                    # This is acceptable for user scope (read-only) but observability systems should
+                    # be aware that child span updates may be lost.
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                         ingest_result: IngestionResult = await loop.run_in_executor(
-                            executor, _ingest_file
+                            executor, lambda: request_context.run(_ingest_file)
                         )
 
                     # Track statistics

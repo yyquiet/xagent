@@ -51,6 +51,7 @@ from ..utils.embedding_utils import (
     normalize_single_embedding,
 )
 from ..utils.model_resolver import resolve_embedding_adapter
+from ..utils.user_scope import resolve_user_scope
 from ..vector_storage.vector_manager import (
     read_chunks_for_embedding,
     write_vectors_to_db,
@@ -66,7 +67,7 @@ def run_document_ingestion(
     ingestion_config: Optional[IngestionConfigInput] = None,
     progress_manager: Optional[Any] = None,
     user_id: Optional[int] = None,
-    is_admin: bool = False,
+    is_admin: Optional[bool] = None,
     file_id: Optional[str] = None,
 ) -> IngestionResult:
     """Public entrypoint for LangGraph-compatible ingestion tooling.
@@ -82,12 +83,16 @@ def run_document_ingestion(
             by external callers.
         progress_manager: Optional progress manager for tracking.
         user_id: Optional user ID for ownership tracking.
-        is_admin: Whether the user has admin privileges for accessing any documents.
+        is_admin: Optional admin override; when omitted, falls back to request scope.
         file_id: Optional UploadedFile file_id for stable file association.
 
     Returns:
         IngestionResult: Same contract as :func:`process_document`.
     """
+    scope = resolve_user_scope(user_id=user_id, is_admin=is_admin)
+    user_id = scope.user_id
+    is_admin = scope.is_admin
+
     cfg = coerce_ingestion_config(ingestion_config)
     return process_document(
         collection,

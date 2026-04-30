@@ -27,6 +27,7 @@ from ..utils.string_utils import (
     build_user_id_filter_for_table,
     escape_lancedb_string,
 )
+from ..utils.user_scope import resolve_user_scope
 from .main_pointer_manager import get_main_pointer
 
 logger = logging.getLogger(__name__)
@@ -58,20 +59,26 @@ def _build_collection_filter(
     Adds user_id filtering only when the target table contains a user_id column.
     """
     base: Dict[str, str] = {"collection": collection}
+    base_expr = build_lancedb_filter_expression(base, skip_user_filter=True)
     table = None
     try:
         table = conn.open_table(table_name)
         if not is_admin and user_id is not None:
             if _table_has_column(table, "user_id"):
-                base_expr = build_lancedb_filter_expression(base)
                 user_expr = build_user_id_filter_for_table(table, int(user_id))
                 return f"{base_expr} AND {user_expr}"
     except Exception:
-        # If we cannot open the table here, fall back to base filter.
-        return build_lancedb_filter_expression(base)
+        # If schema probing fails, keep explicit tenant scope when available.
+        # For unauthenticated non-admin users, preserve deny-all fallback behavior.
+        if not is_admin and user_id is not None:
+            user_expr = build_user_id_filter_for_table(None, int(user_id))
+            return f"{base_expr} AND {user_expr}"
+        if not is_admin and user_id is None:
+            return build_lancedb_filter_expression(base)
+        return base_expr
     finally:
         _safe_close_table(table)
-    return build_lancedb_filter_expression(base)
+    return base_expr
 
 
 def _build_document_filter(
@@ -85,19 +92,24 @@ def _build_document_filter(
 ) -> str:
     """Build a safe filter for document-scoped deletion."""
     base: Dict[str, str] = {"collection": collection, "doc_id": doc_id}
+    base_expr = build_lancedb_filter_expression(base, skip_user_filter=True)
     table = None
     try:
         table = conn.open_table(table_name)
         if not is_admin and user_id is not None:
             if _table_has_column(table, "user_id"):
-                base_expr = build_lancedb_filter_expression(base)
                 user_expr = build_user_id_filter_for_table(table, int(user_id))
                 return f"{base_expr} AND {user_expr}"
     except Exception:
-        return build_lancedb_filter_expression(base)
+        if not is_admin and user_id is not None:
+            user_expr = build_user_id_filter_for_table(None, int(user_id))
+            return f"{base_expr} AND {user_expr}"
+        if not is_admin and user_id is None:
+            return build_lancedb_filter_expression(base)
+        return base_expr
     finally:
         _safe_close_table(table)
-    return build_lancedb_filter_expression(base)
+    return base_expr
 
 
 def _append_user_filter_if_needed(
@@ -324,7 +336,7 @@ def _delete_by_predicates(
             "main_pointers",
             "ingestion_runs",
             "documents",
-        ):
+        ) or name.startswith("embeddings_"):
             continue
         if name not in table_names:
             deleted[name] = 0
@@ -349,7 +361,7 @@ def cascade_delete(
     collection: str,
     doc_id: Optional[str] = None,
     user_id: Optional[int] = None,
-    is_admin: bool = False,
+    is_admin: Optional[bool] = None,
     model_tag: Optional[str] = None,
     preview_only: bool = True,
     confirm: bool = False,
@@ -364,7 +376,7 @@ def cascade_delete(
         collection: Collection name.
         doc_id: Required when target == "document".
         user_id: Optional user ID for multi-tenancy filtering.
-        is_admin: Whether the caller is an admin (no user_id filtering).
+        is_admin: Whether the caller is an admin (None to fallback to context).
         model_tag: Optional embeddings model tag limiter.
         preview_only: If True, only plan counts.
         confirm: If True, execute deletions.
@@ -372,6 +384,10 @@ def cascade_delete(
     Returns:
         Mapping of table name -> deleted (or planned) row count.
     """
+    user_scope = resolve_user_scope(user_id=user_id, is_admin=is_admin)
+    user_id = user_scope.user_id
+    is_admin = user_scope.is_admin
+
     if target == "document" and not doc_id:
         raise CascadeCleanupError("doc_id is required for document cascade delete")
 
@@ -446,7 +462,7 @@ def cleanup_cascade(
     old_parse_hash: Optional[str] = None,
     model_tag: Optional[str] = None,
     user_id: Optional[int] = None,
-    is_admin: bool = True,
+    is_admin: Optional[bool] = None,
     preview_only: bool = True,
     confirm: bool = False,
 ) -> Dict[str, int]:
@@ -460,13 +476,21 @@ def cleanup_cascade(
         old_parse_hash: Optional old main parse hash (auto-filled from pointers if None)
         model_tag: Optional embed model tag limiter
         user_id: Optional user ID for tenant scoping
-        is_admin: Whether caller is admin (no user_id filter)
+        is_admin: Whether caller is admin (None to fallback to context, defaults to True
+                   for system-level version promotion operations)
         preview_only: If True, only plan counts
         confirm: If True, execute deletions
 
     Returns:
         Deleted (or planned) counts per table scope
     """
+    # Default to admin=True for system-level version promotion operations
+    if is_admin is None:
+        is_admin = True
+    user_scope = resolve_user_scope(user_id=user_id, is_admin=is_admin)
+    user_id = user_scope.user_id
+    is_admin = user_scope.is_admin
+
     conn = get_vector_store_raw_connection()
     ensure_documents_table(conn)
     ensure_parses_table(conn)

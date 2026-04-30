@@ -395,3 +395,42 @@ class TestHandleWebFile:
                 # Verify new record was created
                 assert new_record.file_id != nonexistent_file_id
                 assert new_record.filename == filename
+
+
+class TestHandleWebFileUserIsolation:
+    """Test user isolation in KB file operations."""
+
+    def test_database_dedup_isolated_by_user_id(
+        self, db_session: Session, test_user: User, mock_user: MagicMock
+    ):
+        """Same filename from different users should not reuse UploadedFile rows."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            user1_path = Path(temp_dir) / "uploads" / "user_1" / "c1"
+            user2_path = Path(temp_dir) / "uploads" / "user_2" / "c1"
+            user1_path.mkdir(parents=True, exist_ok=True)
+            user2_path.mkdir(parents=True, exist_ok=True)
+
+            same_filename = "same_hash_page.md"
+            path1 = user1_path / same_filename
+            path2 = user2_path / same_filename
+            path1.write_text("user1")
+            path2.write_text("user2")
+
+            record1 = _upsert_uploaded_file_record(
+                db_session,
+                user_id=1,
+                filename=same_filename,
+                storage_path=path1,
+                mime_type="text/markdown",
+                file_size=path1.stat().st_size,
+            )
+            record2 = _upsert_uploaded_file_record(
+                db_session,
+                user_id=2,
+                filename=same_filename,
+                storage_path=path2,
+                mime_type="text/markdown",
+                file_size=path2.stat().st_size,
+            )
+
+            assert record1.file_id != record2.file_id
