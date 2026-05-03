@@ -164,6 +164,42 @@ def test_standalone_task_create_defaults_to_think(test_db, user1_headers):
     assert resp.json()["execution_mode"] == "think"
 
 
+def test_task_create_allows_shared_model_ids(
+    test_db, user1_headers, user2_headers, sample_model_data
+):
+    """When admin shares a model, other users can use it in task creation (Mode B two-step)."""
+    # Admin creates and shares a model
+    admin_login = client.post(
+        "/api/auth/login", json={"username": "admin", "password": "admin123"}
+    )
+    assert admin_login.status_code == 200
+    admin_headers = {"Authorization": f"Bearer {admin_login.json()['access_token']}"}
+
+    shared_data = dict(sample_model_data)
+    shared_data["share_with_users"] = True
+    shared_data["model_id"] = "admin-shared-model"
+
+    created = client.post("/api/models/", json=shared_data, headers=admin_headers)
+    assert created.status_code == 200
+    created_model = created.json()
+    shared_model_id = created_model["model_id"]
+
+    # User1 can use the shared model
+    resp = client.post(
+        "/api/chat/task/create",
+        json={
+            "title": "shared-model-task",
+            "description": "desc",
+            "llm_ids": [shared_model_id, None, None, None],
+        },
+        headers=user1_headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    # The task should use the shared model
+    assert data["model_id"] == shared_model_id
+
+
 def test_get_task_llm_ids_preserves_stored_id_when_model_missing(test_db):
     ensure_system_initialized()
     from xagent.web.models.task import Task, TaskStatus
@@ -194,5 +230,92 @@ def test_get_task_llm_ids_preserves_stored_id_when_model_missing(test_db):
         assert ids[1] == "deleted-fast-id"
         assert ids[2] == "deleted-visual-id"
         assert ids[3] == "deleted-compact-id"
+    finally:
+        db.close()
+
+
+def test_task_create_skips_stale_user_default(test_db, user1_headers):
+    """When a user's default model is no longer visible, task falls back to admin shared."""
+    from xagent.web.models.database import get_db
+    from xagent.web.models.model import Model as DBModel
+    from xagent.web.models.user import User, UserDefaultModel, UserModel
+
+    db = next(get_db())
+    try:
+        user1 = db.query(User).filter(User.username == "user1").first()
+        admin = db.query(User).filter(User.username == "admin").first()
+        assert user1 is not None
+        assert admin is not None
+
+        # -- Admin shared fallback model --
+        admin_shared_model = DBModel(
+            model_id="admin-shared-fallback",
+            category="llm",
+            model_provider="openai",
+            model_name="gpt-4",
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+            temperature=0.7,
+            abilities=["chat"],
+            is_active=True,
+        )
+        db.add(admin_shared_model)
+        db.commit()
+        db.refresh(admin_shared_model)
+
+        db.add(
+            UserModel(
+                user_id=admin.id,
+                model_id=admin_shared_model.id,
+                is_owner=True,
+                is_shared=True,
+            )
+        )
+        db.add(
+            UserDefaultModel(
+                user_id=admin.id,
+                model_id=admin_shared_model.id,
+                config_type="general",
+            )
+        )
+
+        # -- User1's stale default (model with no UserModel row) --
+        stale_model = DBModel(
+            model_id="stale-inaccessible-model",
+            category="llm",
+            model_provider="openai",
+            model_name="gpt-4",
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+            temperature=0.7,
+            abilities=["chat"],
+            is_active=True,
+        )
+        db.add(stale_model)
+        db.commit()
+        db.refresh(stale_model)
+
+        db.add(
+            UserDefaultModel(
+                user_id=user1.id,
+                model_id=stale_model.id,
+                config_type="general",
+            )
+        )
+        db.commit()
+
+        # Create task without specifying llm_ids — should resolve to admin shared fallback
+        resp = client.post(
+            "/api/chat/task/create",
+            json={"title": "test-stale", "description": "desc"},
+            headers=user1_headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # Must NOT use the stale inaccessible model
+        assert data.get("model_id") != "stale-inaccessible-model"
+        # Must use admin's shared fallback model
+        assert data.get("model_id") == "admin-shared-fallback"
     finally:
         db.close()

@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING, Any, Mapping, Optional, Type
 from pydantic import BaseModel, Field
 
 from .....config import get_uploads_dir
+from .....web.services.model_service import (
+    _get_visible_user_ids,
+    _is_model_visible_to_user,
+)
 from ....utils.type_check import ensure_list
 from .base import AbstractBaseTool, ToolCategory, ToolVisibility
 
@@ -418,12 +422,14 @@ class CreateAgentTool(AbstractBaseTool):
                 ).model_dump()
 
             # Get user's default model configuration
+            from .....web.models.model import Model as DBModel
+
             user_defaults = (
                 self._db.query(UserDefaultModel)
-                .join(UserModel, UserDefaultModel.model_id == UserModel.model_id)
+                .join(DBModel, UserDefaultModel.model_id == DBModel.id)
                 .filter(
                     UserDefaultModel.user_id == self._user_id,
-                    UserModel.user_id == self._user_id,
+                    DBModel.is_active,
                 )
                 .all()
             )
@@ -437,6 +443,14 @@ class CreateAgentTool(AbstractBaseTool):
                     "visual",
                     "compact",
                 ]:
+                    if default.model:
+                        try:
+                            if not _is_model_visible_to_user(
+                                self._db, default.model.id, self._user_id
+                            ):
+                                continue
+                        except Exception:
+                            pass
                     models_config[default.config_type] = default.model_id
 
             missing_types = [
@@ -445,13 +459,15 @@ class CreateAgentTool(AbstractBaseTool):
                 if t not in models_config
             ]
             if missing_types:
-                # Fill missing with admin shared defaults
+                # Fill missing with visible users' shared defaults
+                visible_ids = _get_visible_user_ids(self._db, self._user_id)
                 admin_defaults = (
                     self._db.query(UserDefaultModel)
                     .join(UserModel, UserDefaultModel.model_id == UserModel.model_id)
                     .filter(
                         UserDefaultModel.config_type.in_(missing_types),
-                        UserModel.is_shared,
+                        UserModel.is_shared.is_(True),
+                        UserDefaultModel.user_id.in_(visible_ids),
                     )
                     .all()
                 )

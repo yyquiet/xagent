@@ -58,6 +58,8 @@ class DynamicMemoryStoreManager:
                 # Get current user ID from context
                 user_id = current_user_id.get()
 
+                from .services.model_service import _is_model_visible_to_user
+
                 if user_id:
                     # First, try to get user's default embedding model
                     user_default = (
@@ -81,33 +83,42 @@ class DynamicMemoryStoreManager:
                             .first()
                         )
                         if embedding_model:
-                            logger.info(
-                                f"Found user's default embedding model: {embedding_model.model_id}"
-                            )
-                            return embedding_model
+                            if not _is_model_visible_to_user(
+                                db, embedding_model.id, user_id
+                            ):
+                                logger.warning(
+                                    f"User default embedding model {user_default.model_id} is no longer visible"
+                                )
+                                # fall through to system fallback
+                            else:
+                                logger.info(
+                                    f"Found user's default embedding model: {embedding_model.model_id}"
+                                )
+                                return embedding_model
                         else:
                             logger.warning(
                                 f"User default embedding model {user_default.model_id} not found or inactive"
                             )
 
-                # Fallback: look for any active embedding model
-                embedding_model = (
+                # Fallback: look for first active embedding model visible to user
+                all_active_embeddings = (
                     db.query(DBModel)
                     .filter(
                         DBModel.category == "embedding",
                         DBModel.is_active,
                     )
-                    .first()
+                    .all()
                 )
 
-                if embedding_model:
-                    logger.info(
-                        f"Using system active embedding model (user has no default): {embedding_model.model_id}"
-                    )
-                else:
-                    logger.info("No active embedding model found")
+                for embedding_model in all_active_embeddings:
+                    if _is_model_visible_to_user(db, embedding_model.id, user_id):
+                        logger.info(
+                            f"Using visible active embedding model: {embedding_model.model_id}"
+                        )
+                        return embedding_model
 
-                return embedding_model
+                logger.info("No visible active embedding model found")
+                return None
             finally:
                 db.close()
         except Exception as e:
