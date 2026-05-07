@@ -106,6 +106,10 @@ async def list_tools_in_sandbox(
 
         output = output.strip()
         if not output:
+            logger.warning(
+                "MCP list_tools result file is empty after successful exit: %s",
+                result_file,
+            )
             return []
 
         try:

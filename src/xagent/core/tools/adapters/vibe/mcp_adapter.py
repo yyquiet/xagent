@@ -29,6 +29,23 @@ class EmptyArgsModel(BaseModel):
 logger = logging.getLogger(__name__)
 
 
+def _format_exception_group_messages(exc: BaseExceptionGroup) -> str:
+    """Flatten nested exception groups into a readable error string."""
+    messages: list[str] = []
+
+    def _collect(group: BaseExceptionGroup) -> None:
+        for sub_exc in group.exceptions:
+            if isinstance(sub_exc, BaseExceptionGroup):
+                _collect(sub_exc)
+            else:
+                messages.append(str(sub_exc))
+
+    _collect(exc)
+    if not messages:
+        return str(exc)
+    return f"{exc}: " + ", ".join(messages)
+
+
 class MCPToolAdapter(AbstractBaseTool):
     """
     Adapter that converts an MCP tool into an Agent system Tool.
@@ -249,25 +266,20 @@ class MCPToolAdapter(AbstractBaseTool):
                         else False,
                     }
 
-        except Exception as e:
-            logger.error(f"MCP tool {self.mcp_tool.name} execution failed: {e}")
-
-            # Extract real errors from ExceptionGroup if present
-            error_msg = str(e)
-            if isinstance(e, BaseExceptionGroup):
-                sub_msgs: list[str] = []
-                for sub_e in e.exceptions:
-                    if isinstance(sub_e, BaseExceptionGroup):
-                        sub_msgs.extend(
-                            str(sub_sub_e) for sub_sub_e in sub_e.exceptions
-                        )
-                    else:
-                        sub_msgs.append(str(sub_e))
-                if sub_msgs:
-                    error_msg = f"{error_msg}: " + ", ".join(sub_msgs)
-
+        except BaseExceptionGroup as e:
+            logger.error(
+                f"MCP tool {self.mcp_tool.name} execution failed with exception group: {e}"
+            )
+            error_msg = _format_exception_group_messages(e)
             return {
                 "content": [{"text": f"Error executing MCP tool: {error_msg}"}],
+                "is_error": True,
+            }
+
+        except Exception as e:
+            logger.error(f"MCP tool {self.mcp_tool.name} execution failed: {e}")
+            return {
+                "content": [{"text": f"Error executing MCP tool: {e}"}],
                 "is_error": True,
             }
 
@@ -430,8 +442,9 @@ async def load_mcp_tools_as_agent_tools(
     Returns:
         List of MCP-backed agent tools, including sandboxed wrappers when needed
 
-    Raises:
-        Exception: If any MCP server connection fails
+    Notes:
+        Failures loading tools from individual MCP servers are logged and skipped.
+        The function continues processing remaining servers instead of raising.
     """
     agent_tools: List[AbstractBaseTool] = []
 
@@ -439,12 +452,15 @@ async def load_mcp_tools_as_agent_tools(
         try:
             logger.info(f"Loading tools from MCP server: {server_name}")
             if sandbox is not None and should_sandbox_mcp_connection(connection):
-                _sn, _conn = server_name, connection
 
-                def tool_builder(mcp_tool: MCPTool) -> MCPToolAdapter:
+                def tool_builder(
+                    mcp_tool: MCPTool,
+                    _server_name: str = server_name,
+                    _connection: Connection = connection,
+                ) -> MCPToolAdapter:
                     return _build_mcp_tool_adapter(
-                        _sn,
-                        _conn,
+                        _server_name,
+                        _connection,
                         mcp_tool,
                         name_prefix=name_prefix,
                         visibility=visibility,
@@ -475,34 +491,3 @@ async def load_mcp_tools_as_agent_tools(
 
     logger.info(f"Successfully loaded {len(agent_tools)} MCP tools as Agent tools")
     return agent_tools
-
-
-def create_mcp_tool_adapter(
-    mcp_tool: MCPTool,
-    connection: Connection,
-    *,
-    name_prefix: Optional[str] = None,
-    visibility: Optional[ToolVisibility] = None,
-    allow_users: Optional[List[str]] = None,
-) -> MCPToolAdapter:
-    """Create a single MCP tool adapter.
-
-    Convenience function for creating individual tool adapters.
-
-    Args:
-        mcp_tool: The MCP tool to wrap
-        connection: MCP server connection configuration
-        name_prefix: Optional prefix for tool name
-        visibility: Tool visibility setting
-        allow_users: List of allowed user IDs
-
-    Returns:
-        MCPToolAdapter instance
-    """
-    return MCPToolAdapter(
-        mcp_tool=mcp_tool,
-        connection=connection,
-        name_prefix=name_prefix,
-        visibility=visibility,
-        allow_users=allow_users,
-    )

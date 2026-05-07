@@ -115,8 +115,10 @@ class SandboxDependencyManager:
                     )
 
                 cls._sandbox_installed_requirements[sandbox_key] = installed | required
+            except RuntimeError:
+                raise
             except Exception as e:
-                logger.error(f"Error installing dependencies: {e}")
+                logger.error(f"Unexpected error installing dependencies: {e}")
                 raise
 
 
@@ -271,6 +273,10 @@ class SandboxedToolWrapper(AbstractBaseTool):
 
     def state_type(self) -> Optional[Type[BaseModel]]:
         return self._target.state_type()
+
+    def return_value_as_string(self, value: Any) -> str:
+        """Delegate result formatting to the wrapped tool."""
+        return self._target.return_value_as_string(value)
 
     def _build_execution_env(self) -> dict[str, str]:
         """Build per-exec environment variables (scoped to this process, not the sandbox)."""
